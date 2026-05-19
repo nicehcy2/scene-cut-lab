@@ -1,0 +1,28 @@
+# 영상 파일
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# 이미지 파일
+*.jpg
+
+# 추출된 프레임
+frames/
+
+# 결과 파일
+*.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.egg-info/
+
+# 환경
+.env
+
+.zip
