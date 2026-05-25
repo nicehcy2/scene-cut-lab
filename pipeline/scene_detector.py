@@ -24,7 +24,7 @@ def detect_scenes(video_path: str, frames_per_scene: int, frames_dir: str) -> Li
 
     os.makedirs(frames_dir, exist_ok=True)
 
-    scene_list = detect(video_path, ContentDetector())
+    scene_list = detect(video_path, ContentDetector(threshold=15))
     if not scene_list:
         raise RuntimeError("감지된 장면이 없습니다. 영상 파일을 확인하세요.")
 

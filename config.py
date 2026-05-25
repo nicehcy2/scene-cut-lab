@@ -1,18 +1,18 @@
 CLIP_MODEL = "ViT-B/32"
 
 HIGHLIGHT_PROMPTS = [
-    "people laughing and having fun together",
-    "exciting travel moment",
-    "friends eating delicious food",
-    "beautiful scenic view",
-    "candid funny moment",
+    "a man with glasses speaking directly to the camera",
+    "a man wearing glasses talking and presenting",
+    "close-up of a man with glasses explaining something",
+    "a man with glasses looking at the camera and speaking",
 ]
 
 BORING_PROMPTS = [
-    "boring empty scene with no people",
-    "mundane daily task",
+    "a woman appearing in the scene",
+    "a female person on screen",
+    "woman talking or walking in the video",
+    "scene without a man with glasses",
     "dark or blurry footage",
-    "person looking at phone, nothing happening",
 ]
 
 FRAMES_PER_SCENE = 3

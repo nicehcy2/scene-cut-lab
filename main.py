@@ -56,7 +56,9 @@ def main():
 
     # 3단계: 상위 N개 선택
     print(f"[3/3] 상위 {args.top_n}개 장면 선택 중...")
+    t0 = time.time()
     highlights = select_top(scored, args.top_n)
+    print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
     elapsed = time.time() - total_start
     print(f"\n총 처리 시간: {elapsed:.1f}s")

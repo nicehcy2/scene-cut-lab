@@ -25,4 +25,4 @@ venv/
 # 환경
 .env
 
-.zip
+*.zip
