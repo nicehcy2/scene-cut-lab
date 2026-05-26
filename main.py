@@ -21,6 +21,8 @@ from pipeline.scene_detector import detect_scenes, Scene
 from pipeline.gemini_scorer import score_scenes
 from pipeline.highlight_selector import select_top
 from pipeline.video_exporter import export_highlight
+from pipeline.meta_extractor import compute_meta
+from pipeline.grid_builder import build_grids
 
 
 def parse_args():
@@ -50,6 +52,8 @@ def parse_args():
                         help="하이라이트 영상 출력 경로 (예: highlight.mp4)")
     parser.add_argument("--output", default=None, metavar="JSON_PATH",
                         help="결과 JSON 저장 경로 (기본값: 표준출력)")
+    parser.add_argument("--keep-only", action="store_true",
+                        help="keep 장면만 포함 (maybe 제외)")
     return parser.parse_args()
 
 
@@ -57,10 +61,20 @@ def parse_args():
 # 모드 1: 장면 감지만 실행
 # ────────────────────────────────────────────────
 def run_detect_only(args):
-    print(f"\n[1/1] 장면 분할 중: {args.video}")
+    print(f"\n[1/3] 장면 분할 중: {args.video}")
     t0 = time.time()
     scenes = detect_scenes(args.video, args.frames_per_scene, args.frames_dir)
     print(f"      완료 ({time.time() - t0:.1f}s) — {len(scenes)}개 장면\n")
+
+    print(f"[2/3] 메타데이터 추출 중...")
+    t0 = time.time()
+    metas = compute_meta(scenes)
+    print(f"      완료 ({time.time() - t0:.1f}s)\n")
+
+    print(f"[3/3] 이미지 그리드 생성 중...")
+    t0 = time.time()
+    grid_paths = build_grids(scenes)
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(grid_paths)}장\n")
 
     output_data = [
         {
@@ -71,16 +85,19 @@ def run_detect_only(args):
             "end_sec": s.end_sec,
             "duration_sec": round(s.end_sec - s.start_sec, 3),
             "frame_paths": s.frame_paths,
+            "meta": metas[i],
         }
-        for s in scenes
+        for i, s in enumerate(scenes)
     ]
 
-    _save_or_print(output_data, args.output or "scenes.json")
+    json_path = args.output or "scenes.json"
+    _save_or_print(output_data, json_path)
     print(
-        "GPT에게 넘길 준비 완료.\n"
-        "frames/ 폴더의 이미지와 scenes.json을 GPT에 전달하고,\n"
+        "\nGPT에게 넘길 준비 완료.\n"
+        f"  → {json_path}\n"
+        f"  → grids/ 폴더 ({len(grid_paths)}장)\n\n"
         "점수를 받아 scored.json으로 저장한 뒤 아래 명령으로 이어서 실행하세요:\n\n"
-        f"  python main.py \"{args.video}\" --from-scores scored.json --export highlight.mp4"
+        f"  python main.py \"{args.video}\" --from-scores scored.json --top-n 0 --export highlight.mp4"
     )
 
 
@@ -88,22 +105,33 @@ def run_detect_only(args):
 # 모드 2: scored.json 받아서 선택 + 합치기
 # ────────────────────────────────────────────────
 def run_from_scores(args):
-    print(f"\n[1/2] scored.json 로드 중: {args.from_scores}")
+    total_start = time.time()
+
+    print(f"\n[1/3] scored.json 로드 중: {args.from_scores}")
+    t0 = time.time()
     with open(args.from_scores, encoding="utf-8") as f:
         scored = json.load(f)
-    print(f"      {len(scored)}개 장면 로드됨\n")
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(scored)}개 장면 로드됨\n")
 
-    print(f"[2/2] 상위 {args.top_n}개 선택 중...")
-    highlights = select_top(scored, args.top_n)
-    print(f"      {len(highlights)}개 선택됨\n")
+    top_label = f"상위 {args.top_n}개" if args.top_n > 0 else "전체"
+    print(f"[2/3] 장면 선택 중 ({top_label})...")
+    t0 = time.time()
+    highlights = select_top(scored, args.top_n, keep_only=args.keep_only)
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨")
+    for h in highlights:
+        print(f"  Scene {h['scene']:3d} | {h['start']} ~ {h['end']} | score={h.get('final_score', '?')}")
+    print()
 
     if args.export:
-        print(f"      영상 합치는 중: {args.export}")
+        print(f"[3/3] 영상 합치는 중: {args.export}")
         t0 = time.time()
         export_highlight(args.video, highlights, args.export)
         size_mb = os.path.getsize(args.export) / (1024 * 1024)
         print(f"      완료 ({time.time() - t0:.1f}s) — {size_mb:.1f} MB\n")
+    else:
+        print("[3/3] --export 미지정, 영상 파일 생성 건너뜀\n")
 
+    print(f"총 처리 시간: {time.time() - total_start:.1f}s")
     _save_or_print(highlights, args.output)
 
 
@@ -132,7 +160,7 @@ def run_full_auto(args):
 
     print(f"[3/4] 상위 {args.top_n}개 장면 선택 중...")
     t0 = time.time()
-    highlights = select_top(scored, args.top_n)
+    highlights = select_top(scored, args.top_n, keep_only=args.keep_only)
     print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
     if args.export:

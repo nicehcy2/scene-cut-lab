@@ -9,12 +9,12 @@ from typing import List
 import config
 
 
-def select_top(results: List[dict], top_n: int) -> List[dict]:
+def select_top(results: List[dict], top_n: int, keep_only: bool = False) -> List[dict]:
     def _include(r: dict) -> bool:
         decision = r.get("decision", "drop")
         if decision == "keep":
             return True
-        if decision == "maybe":
+        if not keep_only and decision == "maybe":
             return r.get("final_score", 0) >= config.MAYBE_MIN_SCORE
         return False
 
