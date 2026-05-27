@@ -2,14 +2,14 @@
 영상 하이라이트 자동 추출 파이프라인
 
 [전체 자동 모드]
-    python main.py input.mp4 --subject 사람 --export highlight.mp4
+    python main.py input.mp4 --export
 
 [2단계 분리 모드]
-  1단계 - 장면 감지만 실행, GPT용 JSON 저장:
-    python main.py input.mp4 --detect-only --output scenes.json
+  1단계 - 장면 감지만 실행, JSON 저장:
+    python main.py input.mp4 --detect-only
 
-  2단계 - GPT가 채운 scored.json으로 영상 합치기:
-    python main.py input.mp4 --from-scores scored.json --export highlight.mp4
+  2단계 - scored.json으로 영상 합치기:
+    python main.py input.mp4 --from-scores runs/.../scenes.json --export
 """
 import argparse
 import json
@@ -20,9 +20,11 @@ from pathlib import Path
 
 import config
 from pipeline.scene_detector import detect_scenes
-from pipeline.gemini_scorer import score_scenes
+from pipeline.gemini_scorer import score_scenes, score_scenes_grid
 from pipeline.highlight_selector import select_top
 from pipeline.video_exporter import export_highlight
+from pipeline.meta_extractor import compute_meta
+from pipeline.grid_builder import build_grids
 
 
 def _make_run_dir(video_path: str) -> str:
@@ -35,14 +37,13 @@ def _make_run_dir(video_path: str) -> str:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="영상 하이라이트 장면 자동 추출")
-    parser.add_argument("video", help="분석할 mp4 영상 경로")
+    parser.add_argument("video", help="분석할 mp4 영상 경로 (inputs/ 폴더 기준)")
 
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--detect-only", action="store_true",
-                      help="장면 감지 + 프레임 추출만 실행하고 scenes.json 저장. "
-                           "GPT에게 넘겨 점수를 받은 뒤 --from-scores로 이어서 실행")
+                      help="장면 감지 + 프레임 추출만 실행하고 scenes.json 저장.")
     mode.add_argument("--from-scores", metavar="SCORED_JSON",
-                      help="GPT가 점수 매긴 JSON 파일을 받아 선택 + 영상 합치기만 실행")
+                      help="점수 매긴 JSON 파일을 받아 선택 + 영상 합치기만 실행")
 
     parser.add_argument("--subject", default=None, choices=config.SUBJECT_CHOICES,
                         metavar="SUBJECT",
@@ -58,6 +59,12 @@ def parse_args():
                         help="하이라이트 영상 생성 (runs/{영상명}_{시각}/highlight.mp4)")
     parser.add_argument("--output", default=None, metavar="JSON_PATH",
                         help="결과 JSON 저장 경로 (기본값: runs/{영상명}_{시각}/results.json)")
+    parser.add_argument("--keep-only", action="store_true",
+                        help="keep 장면만 포함 (maybe 제외)")
+    parser.add_argument("--maybe-min-score", type=float, default=config.MAYBE_MIN_SCORE,
+                        help=f"maybe 포함 최소 점수 (기본값: {config.MAYBE_MIN_SCORE}, 범위: 0~5)")
+    parser.add_argument("--mode", default="parallel", choices=["parallel", "grid"],
+                        help="Gemini 호출 방식: parallel=병렬 개별(기본), grid=그리드 맥락")
     return parser.parse_args()
 
 
@@ -66,11 +73,23 @@ def parse_args():
 # ────────────────────────────────────────────────
 def run_detect_only(args, run_dir):
     frames_dir = os.path.join(run_dir, "frames")
+    grids_dir = os.path.join(run_dir, "grids")
     print(f"\n실행 디렉토리: {run_dir}")
-    print(f"\n[1/1] 장면 분할 중: {args.video}")
+
+    print(f"\n[1/3] 장면 분할 중: {args.video}")
     t0 = time.time()
     scenes = detect_scenes(args.video, args.frames_per_scene, frames_dir)
     print(f"      완료 ({time.time() - t0:.1f}s) — {len(scenes)}개 장면\n")
+
+    print(f"[2/3] 메타데이터 추출 중...")
+    t0 = time.time()
+    metas = compute_meta(scenes)
+    print(f"      완료 ({time.time() - t0:.1f}s)\n")
+
+    print(f"[3/3] 이미지 그리드 생성 중...")
+    t0 = time.time()
+    grid_paths = build_grids(scenes, grids_dir)
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(grid_paths)}장\n")
 
     output_data = [
         {
@@ -81,8 +100,9 @@ def run_detect_only(args, run_dir):
             "end_sec": s.end_sec,
             "duration_sec": round(s.end_sec - s.start_sec, 3),
             "frame_paths": s.frame_paths,
+            "meta": metas[i],
         }
-        for s in scenes
+        for i, s in enumerate(scenes)
     ]
 
     json_path = args.output or os.path.join(run_dir, "scenes.json")
@@ -95,24 +115,35 @@ def run_detect_only(args, run_dir):
 # 모드 2: scored.json 받아서 선택 + 합치기
 # ────────────────────────────────────────────────
 def run_from_scores(args, run_dir):
+    total_start = time.time()
     print(f"\n실행 디렉토리: {run_dir}")
-    print(f"\n[1/2] scored.json 로드 중: {args.from_scores}")
+
+    print(f"\n[1/3] scored.json 로드 중: {args.from_scores}")
+    t0 = time.time()
     with open(args.from_scores, encoding="utf-8") as f:
         scored = json.load(f)
-    print(f"      {len(scored)}개 장면 로드됨\n")
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(scored)}개 장면 로드됨\n")
 
-    print(f"[2/2] 상위 {args.top_n}개 선택 중...")
-    highlights = select_top(scored, args.top_n)
-    print(f"      {len(highlights)}개 선택됨\n")
+    top_label = f"상위 {args.top_n}개" if args.top_n > 0 else "전체"
+    print(f"[2/3] 장면 선택 중 ({top_label})...")
+    t0 = time.time()
+    highlights = select_top(scored, args.top_n, keep_only=args.keep_only, maybe_min_score=args.maybe_min_score)
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨")
+    for h in highlights:
+        print(f"  Scene {h['scene']:3d} | {h['start']} ~ {h['end']} | score={h.get('final_score', '?')}")
+    print()
 
     if args.export:
         export_path = os.path.join(run_dir, "highlight.mp4")
-        print(f"      영상 합치는 중: {export_path}")
+        print(f"[3/3] 영상 합치는 중: {export_path}")
         t0 = time.time()
         export_highlight(args.video, highlights, export_path)
         size_mb = os.path.getsize(export_path) / (1024 * 1024)
         print(f"      완료 ({time.time() - t0:.1f}s) — {size_mb:.1f} MB\n")
+    else:
+        print("[3/3] --export 미지정, 영상 파일 생성 건너뜀\n")
 
+    print(f"총 처리 시간: {time.time() - total_start:.1f}s")
     _save(highlights, args.output or os.path.join(run_dir, "results.json"))
 
 
@@ -123,6 +154,7 @@ def run_full_auto(args, run_dir):
     total_start = time.time()
     frames_dir = os.path.join(run_dir, "frames")
     subject_label = f" [{args.subject}]" if args.subject else " [자동 감지]"
+    mode_label = "그리드" if args.mode == "grid" else "병렬"
 
     print(f"\n실행 디렉토리: {run_dir}")
     print(f"\n[1/3] 장면 분할 중: {args.video}")
@@ -130,20 +162,29 @@ def run_full_auto(args, run_dir):
     scenes = detect_scenes(args.video, args.frames_per_scene, frames_dir)
     print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
-    print(f"[2/3] Gemini 하이라이트 점수 계산 중{subject_label}...")
+    print(f"[2/3] Gemini 하이라이트 점수 계산 중{subject_label} [{mode_label}]...")
     t0 = time.time()
-    scored = score_scenes(
-        scenes,
-        master_prompt=config.MASTER_PROMPT,
-        subject_prompts=config.SUBJECT_PROMPTS,
-        model_name=args.model,
-        subject=args.subject,
-    )
+    if args.mode == "grid":
+        scored = score_scenes_grid(
+            scenes,
+            master_prompt=config.MASTER_PROMPT,
+            subject_prompts=config.SUBJECT_PROMPTS,
+            model_name=args.model,
+            subject=args.subject,
+        )
+    else:
+        scored = score_scenes(
+            scenes,
+            master_prompt=config.MASTER_PROMPT,
+            subject_prompts=config.SUBJECT_PROMPTS,
+            model_name=args.model,
+            subject=args.subject,
+        )
     print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
-    print(f"[3/3] 상위 {args.top_n}개 장면 선택 중...")
+    print(f"[3/3] 장면 선택 중...")
     t0 = time.time()
-    highlights = select_top(scored, args.top_n)
+    highlights = select_top(scored, args.top_n, keep_only=args.keep_only, maybe_min_score=args.maybe_min_score)
     print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨\n")
 
     if args.export:
