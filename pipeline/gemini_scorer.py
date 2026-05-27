@@ -44,11 +44,13 @@ def score_scenes(
     if subject and subject in subject_prompts:
         subject_section = subject_prompts[subject]
     else:
-        subject_section = "\n\n---\n\n".join(
-            f"[{name} 기준]\n{prompt}"
-            for name, prompt in subject_prompts.items()
-            if name != "unknown"
-        )
+        subject_parts = []
+        for name, prompt in subject_prompts.items():
+            if name == "unknown":
+                continue
+            subject_parts.append(f"[{name} 기준]\n{prompt}")
+
+        subject_section = "\n\n---\n\n".join(subject_parts)
         subject_section += f"\n\n---\n\n[unknown 기준]\n{subject_prompts.get('unknown', '')}"
 
     def process_scene(scene: Scene) -> tuple:
@@ -350,11 +352,13 @@ def score_scenes_grid(
     if subject and subject in subject_prompts:
         subject_section = subject_prompts[subject]
     else:
-        subject_section = "\n\n---\n\n".join(
-            f"[{name} 기준]\n{prompt}"
-            for name, prompt in subject_prompts.items()
-            if name != "unknown"
-        )
+        subject_parts = []
+        for name, prompt in subject_prompts.items():
+            if name == "unknown":
+                continue
+            subject_parts.append(f"[{name} 기준]\n{prompt}")
+
+        subject_section = "\n\n---\n\n".join(subject_parts)
         subject_section += f"\n\n---\n\n[unknown 기준]\n{subject_prompts.get('unknown', '')}"
 
     results_map: dict = {}
