@@ -496,13 +496,9 @@ def _parse_grid_response(text: str, scenes: List[Scene]) -> dict:
             if scene_no is not None:
                 parsed_by_scene[int(scene_no)] = parsed
 
-        # scene 번호가 없는 응답은 순서 기반으로 폴백
         if not parsed_by_scene:
-            for scene, item in zip(scenes, data):
-                try:
-                    parsed_by_scene[scene.index] = _validate(item)
-                except Exception:
-                    parsed_by_scene[scene.index] = fallback_item.copy()
+            print(f"  [경고] 그리드 응답 항목에 'scene' 키 없음 — fallback 처리. 원본:\n{text[:300]}")
+            return {s.index: fallback_item.copy() for s in scenes}
 
         return parsed_by_scene
     except Exception:
