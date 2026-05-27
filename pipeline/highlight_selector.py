@@ -9,13 +9,18 @@ from typing import List
 import config
 
 
-def select_top(results: List[dict], top_n: int, keep_only: bool = False) -> List[dict]:
+def select_top(
+    results: List[dict],
+    top_n: int,
+    keep_only: bool = False,
+    maybe_min_score: float = config.MAYBE_MIN_SCORE,
+) -> List[dict]:
     def _include(r: dict) -> bool:
         decision = r.get("decision", "drop")
         if decision == "keep":
             return True
         if not keep_only and decision == "maybe":
-            return r.get("final_score", 0) >= config.MAYBE_MIN_SCORE
+            return r.get("final_score", 0) >= maybe_min_score
         return False
 
     candidates = [r for r in results if _include(r)]

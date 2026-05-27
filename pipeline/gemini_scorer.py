@@ -5,18 +5,23 @@ Gemini 2.5 Flash 기반 장면 하이라이트 스코어러
 import io
 import json
 import os
+import random
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Optional
 
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 import config
 from pipeline.frame_filter import filter_frames
 from pipeline.scene_detector import Scene
+
+MAX_CONCURRENT = 5  # 동시 Gemini API 요청 수 상한
 
 
 def score_scenes(
@@ -32,9 +37,21 @@ def score_scenes(
     None이면 모든 피사체 프롬프트를 포함해 Gemini가 자동 판단한다.
     """
     client = _build_client()
+    semaphore = threading.Semaphore(MAX_CONCURRENT)
+    print_lock = threading.Lock()
 
-    results = []
-    for scene in scenes:
+    # 4: subject_section을 루프 밖에서 한 번만 조립
+    if subject and subject in subject_prompts:
+        subject_section = subject_prompts[subject]
+    else:
+        subject_section = "\n\n---\n\n".join(
+            f"[{name} 기준]\n{prompt}"
+            for name, prompt in subject_prompts.items()
+            if name != "unknown"
+        )
+        subject_section += f"\n\n---\n\n[unknown 기준]\n{subject_prompts.get('unknown', '')}"
+
+    def process_scene(scene: Scene) -> tuple:
         valid_paths = filter_frames(
             scene.frame_paths,
             blur_threshold=config.BLUR_THRESHOLD,
@@ -42,26 +59,37 @@ def score_scenes(
         )
 
         if not valid_paths:
-            print(f"  [경고] Scene {scene.index}: 유효한 프레임 없음, DROP 처리")
-            results.append(_make_fallback(scene))
-            continue
+            with print_lock:
+                print(f"  [경고] Scene {scene.index}: 유효한 프레임 없음, DROP 처리")
+            return scene.index, _make_fallback(scene)
 
-        contents = _build_contents(valid_paths, master_prompt, subject_prompts, subject, scene)
-        response_text = _call_gemini(client, model_name, contents)
+        contents = _build_contents(valid_paths, master_prompt, subject_section, scene)
+        with semaphore:  # 1: 동시 요청 수 제한
+            response_text = _call_gemini(client, model_name, contents)
+
         parsed = _parse_response(response_text)
         result = _make_result(scene, parsed)
-        results.append(result)
 
         decision_mark = {"keep": "✓", "maybe": "△", "drop": "✗"}.get(result["decision"], "?")
-        print(
-            f"  Scene {scene.index:3d} | {scene.start} ~ {scene.end} "
-            f"| {decision_mark} {result['decision'].upper():5s} "
-            f"| final={result['final_score']:.1f} "
-            f"| {result['main_subject']} "
-            f"| {result['reason']}"
-        )
+        with print_lock:
+            print(
+                f"  Scene {scene.index:3d} | {scene.start} ~ {scene.end} "
+                f"| {decision_mark} {result['decision'].upper():5s} "
+                f"| final={result['final_score']:.1f} "
+                f"| {result['detected_subject']}"
+                f"| {result['reason']}"
+            )
+        return scene.index, result
 
-    return results
+    # 1: 병렬 실행 후 원래 순서로 복원
+    results_map: dict = {}
+    with ThreadPoolExecutor(max_workers=MAX_CONCURRENT) as executor:
+        futures = {executor.submit(process_scene, scene): scene for scene in scenes}
+        for future in as_completed(futures):
+            idx, result = future.result()
+            results_map[idx] = result
+
+    return [results_map[scene.index] for scene in scenes]
 
 
 def _build_client() -> genai.Client:
@@ -80,31 +108,17 @@ def _build_client() -> genai.Client:
 def _build_contents(
     paths: List[str],
     master_prompt: str,
-    subject_prompts: dict,
-    subject: Optional[str],
+    subject_section: str,
     scene: Scene,
 ) -> list:
     parts = []
 
-    # 이미지 파트
     for path in paths:
         img = Image.open(path).convert("RGB")
         img.thumbnail((1024, 1024), Image.LANCZOS)
         buf = io.BytesIO()
         img.save(buf, format="JPEG")
         parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
-
-    # 피사체 프롬프트 조합
-    if subject and subject in subject_prompts:
-        subject_section = subject_prompts[subject]
-    else:
-        # 피사체 미지정 → 전체 포함 (Gemini가 STEP 2에서 자동 선택)
-        subject_section = "\n\n---\n\n".join(
-            f"[{name} 기준]\n{prompt}"
-            for name, prompt in subject_prompts.items()
-            if name != "unknown"
-        )
-        subject_section += f"\n\n---\n\n[unknown 기준]\n{subject_prompts.get('unknown', '')}"
 
     full_prompt = (
         f"{master_prompt}\n\n"
@@ -115,108 +129,174 @@ def _build_contents(
         f"- scene {scene.index}, {scene.start} ~ {scene.end}\n"
         f"- 위 이미지 {len(paths)}장이 이 장면의 대표 프레임이다.\n\n"
         f"반드시 아래 JSON 형식으로만 응답해라. JSON 외 다른 텍스트는 포함하지 마라:\n"
-        f'{{"decision": "keep|maybe|drop", '
-        f'"main_subject": "사람|동물|풍경/공간|음식/음료|이동수단|사물/활동|unknown", '
+        f'{{"detected_subject": "사람|동물|풍경/공간|음식/음료|이동수단|사물/활동|unknown", '
+        f'"secondary_subject": "사람|동물|...|null", '
+        f'"applied_criteria": "사람 피사체 기준|동물 피사체 기준|...", '
+        f'"general_drop": true|false, '
+        f'"general_drop_reason": "해당 DROP 조건 한 줄|null", '
         f'"quality_score": 1~5, '
-        f'"subject_score": 1~10, '
-        f'"edit_score": 1~5, '
-        f'"final_score": 소수점1자리, '
-        f'"reason": "이유 한 줄 (한국어)", '
-        f'"recommended_use": "메인 컷|리액션 컷|전환 컷|보조 컷|제거"}}'
+        f'"visual_score": 1~5, '
+        f'"reason": "이유 한 줄 (한국어)"}}'
     )
 
     parts.append(types.Part.from_text(text=full_prompt))
     return [types.Content(role="user", parts=parts)]
 
 
-def _call_gemini(client: genai.Client, model_name: str, contents: list, max_retry: int = 3) -> str:
-    delay = 1.0
+def _call_gemini(client: genai.Client, model_name: str, contents: list, max_retry: int = 5) -> str:
+    delay = 2.0
     for attempt in range(max_retry):
         try:
+            # 2: JSON 응답 강제 → 파싱 오류 최소화
             response = client.models.generate_content(
                 model=model_name,
                 contents=contents,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                ),
             )
             return response.text
         except Exception as e:
+            err_str = str(e)
+            is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+
             if attempt == max_retry - 1:
                 print(f"  [오류] Gemini API 호출 실패: {e}")
                 return ""
-            print(f"  [재시도 {attempt + 1}/{max_retry}] {e}")
-            time.sleep(delay)
-            delay *= 2
+
+            if is_rate_limit:
+                match = re.search(r"retryDelay.*?(\d+)s", err_str)
+                wait = int(match.group(1)) + 2 if match else 60
+                print(f"  [재시도 {attempt + 1}/{max_retry}] Rate Limit — {wait}초 대기 중...")
+            elif "503" in err_str or "UNAVAILABLE" in err_str:
+                # 서버 과부하 — jitter 추가해서 스레드들이 동시에 재시도하지 않도록
+                wait = delay + random.uniform(0, 5)
+                delay *= 2
+                print(f"  [재시도 {attempt + 1}/{max_retry}] 서버 과부하 — {wait:.1f}초 대기 중...")
+            else:
+                wait = delay
+                delay *= 2
+                print(f"  [재시도 {attempt + 1}/{max_retry}] {e}")
+
+            time.sleep(wait)
     return ""
 
 
 def _parse_response(text: str) -> dict:
-    # 1단계: 직접 파싱
     try:
         data = json.loads(text.strip())
+        if isinstance(data, list):
+            data = data[0] if data else {}
         return _validate(data)
-    except (json.JSONDecodeError, ValueError, KeyError):
-        pass
-
-    # 2단계: 정규식으로 JSON 블록 추출
-    match = re.search(r"\{.*?\}", text, re.DOTALL)
-    if match:
-        try:
-            data = json.loads(match.group())
-            return _validate(data)
-        except (json.JSONDecodeError, ValueError, KeyError):
-            pass
-
-    # 3단계: fallback
-    return {
-        "decision": "maybe",
-        "main_subject": "unknown",
-        "quality_score": 3.0,
-        "subject_score": 3.0,
-        "edit_score": 2.0,
-        "final_score": 2.7,
-        "reason": f"응답 파싱 실패: {text[:60]}",
-        "recommended_use": "보조 컷",
-    }
+    except (json.JSONDecodeError, ValueError, KeyError, IndexError, AttributeError):
+        return {
+            "detected_subject": "unknown",
+            "secondary_subject": None,
+            "applied_criteria": "",
+            "general_drop": False,
+            "general_drop_reason": None,
+            "quality_score": 3.0,
+            "visual_score": 2.0,
+            "reason": f"응답 파싱 실패: {text[:60]}",
+        }
 
 
 def _validate(data: dict) -> dict:
-    decision = str(data.get("decision", "maybe")).lower()
-    if decision not in ("keep", "maybe", "drop"):
-        decision = "maybe"
+    def clamp(val, lo, hi, default):
+        try:
+            return min(hi, max(lo, float(val)))
+        except (TypeError, ValueError):
+            return default
 
-    def clamp(val, lo, hi):
-        return min(hi, max(lo, float(val)))
+    detected_subject = str(data.get("detected_subject", "unknown"))
+    if detected_subject not in ("사람", "동물", "풍경/공간", "음식/음료", "이동수단", "사물/활동", "unknown"):
+        detected_subject = "unknown"
 
-    quality = clamp(data.get("quality_score", 3), 1, 5)
-    subject = clamp(data.get("subject_score", 3), 1, 10)
-    edit = clamp(data.get("edit_score", 2), 1, 5)
+    secondary = data.get("secondary_subject")
+    if secondary is not None:
+        secondary = str(secondary)
+        if secondary.lower() in ("null", "none", ""):
+            secondary = None
 
-    # subject_score를 5점 척도로 정규화 (HTML 기준이 1~10점)
-    subject_norm = subject / 2.0
-
-    final = round(quality * 0.3 + subject_norm * 0.4 + edit * 0.3, 1)
-
-    # final_score가 명시된 경우 우선 사용, 없으면 계산값 사용
-    if "final_score" in data:
-        final = round(clamp(data["final_score"], 0, 5), 1)
+    general_drop_reason = data.get("general_drop_reason")
+    if general_drop_reason is not None:
+        general_drop_reason = str(general_drop_reason)
+        if general_drop_reason.lower() in ("null", "none", ""):
+            general_drop_reason = None
 
     return {
-        "decision": decision,
-        "main_subject": str(data.get("main_subject", "unknown")),
-        "quality_score": quality,
-        "subject_score": subject,
-        "edit_score": edit,
-        "final_score": final,
+        "detected_subject": detected_subject,
+        "secondary_subject": secondary,
+        "applied_criteria": str(data.get("applied_criteria", "")),
+        "general_drop": bool(data.get("general_drop", False)),
+        "general_drop_reason": general_drop_reason,
+        "quality_score": clamp(data.get("quality_score", 3), 1, 5, 3.0),
+        "visual_score": clamp(data.get("visual_score", 2), 1, 5, 2.0),
         "reason": str(data.get("reason", "")),
-        "recommended_use": str(data.get("recommended_use", "보조 컷")),
+    }
+
+
+def _compute_backend_scores(
+    quality_score: float,
+    visual_score: float,
+    general_drop: bool,
+    speech_score: float = 3.0,
+    style: str = "장면 중심",
+) -> dict:
+    if general_drop or visual_score <= 1:
+        return {
+            "speech_score": int(speech_score),
+            "subject_score": 1.0,
+            "final_score": 0.0,
+            "decision": "drop",
+            "recommended_use": "제거",
+        }
+
+    weight_map = {
+        "장면 중심": (0.7, 0.3),
+        "음성 중심": (0.3, 0.7),
+        "균형": (0.5, 0.5),
+    }
+    w_v, w_s = weight_map.get(style, (0.7, 0.3))
+    subject_score = visual_score * w_v + speech_score * w_s
+    final_raw = quality_score * 0.4 + subject_score * 0.6
+
+    if final_raw >= 3.5:
+        decision = "keep"
+    elif final_raw >= 2.5:
+        decision = "maybe"
+    else:
+        decision = "drop"
+
+    if decision == "drop":
+        recommended_use = "제거"
+    elif decision == "keep" and visual_score >= 4:
+        recommended_use = "메인 컷"
+    else:
+        recommended_use = "보조 컷"
+
+    return {
+        "speech_score": int(speech_score),
+        "subject_score": round(subject_score, 1),
+        "final_score": round(final_raw, 1),
+        "decision": decision,
+        "recommended_use": recommended_use,
     }
 
 
 def _make_result(scene: Scene, parsed: dict) -> dict:
+    backend = _compute_backend_scores(
+        quality_score=parsed["quality_score"],
+        visual_score=parsed["visual_score"],
+        general_drop=parsed["general_drop"],
+    )
     return {
         "scene": scene.index,
         "start": scene.start,
         "end": scene.end,
+        "frame_paths": scene.frame_paths,
         **parsed,
+        **backend,
     }
 
 
@@ -225,12 +305,199 @@ def _make_fallback(scene: Scene) -> dict:
         "scene": scene.index,
         "start": scene.start,
         "end": scene.end,
-        "decision": "drop",
-        "main_subject": "unknown",
+        "detected_subject": "unknown",
+        "secondary_subject": None,
+        "applied_criteria": "",
+        "general_drop": True,
+        "general_drop_reason": "유효한 프레임 없음",
         "quality_score": 0,
-        "subject_score": 0,
-        "edit_score": 0,
-        "final_score": 0.0,
+        "visual_score": 0,
         "reason": "유효한 프레임 없음",
+        "speech_score": 1,
+        "subject_score": 0.0,
+        "final_score": 0.0,
+        "decision": "drop",
         "recommended_use": "제거",
     }
+
+
+# ──────────────────────────────────────────────
+# 그리드 방식 (맥락 파악용)
+# ──────────────────────────────────────────────
+
+_THUMB_W = 480
+_THUMB_H = 270
+_LABEL_H = 32
+_CELL_PAD = 4
+
+
+def score_scenes_grid(
+    scenes: List[Scene],
+    master_prompt: str,
+    subject_prompts: dict,
+    model_name: str,
+    subject: Optional[str] = None,
+    chunk_size: int = 12,
+) -> List[dict]:
+    """그리드 방식: chunk_size개 장면을 이미지 1장으로 묶어 Gemini에 전송.
+    맥락 파악 가능, API 호출 횟수 = ceil(장면 수 / chunk_size).
+    """
+    client = _build_client()
+
+    if subject and subject in subject_prompts:
+        subject_section = subject_prompts[subject]
+    else:
+        subject_section = "\n\n---\n\n".join(
+            f"[{name} 기준]\n{prompt}"
+            for name, prompt in subject_prompts.items()
+            if name != "unknown"
+        )
+        subject_section += f"\n\n---\n\n[unknown 기준]\n{subject_prompts.get('unknown', '')}"
+
+    results_map: dict = {}
+    chunks = [scenes[i:i + chunk_size] for i in range(0, len(scenes), chunk_size)]
+
+    for chunk_idx, chunk in enumerate(chunks):
+        print(f"  [그리드 {chunk_idx + 1}/{len(chunks)}] Scene {chunk[0].index}~{chunk[-1].index} 분석 중...")
+        grid_img = _build_grid_image(chunk)
+        contents = _build_grid_contents(grid_img, master_prompt, subject_section, chunk)
+        response_text = _call_gemini(client, model_name, contents)
+        parsed_list = _parse_grid_response(response_text, chunk)
+
+        for scene, parsed in zip(chunk, parsed_list):
+            result = _make_result(scene, parsed)
+            results_map[scene.index] = result
+            decision_mark = {"keep": "✓", "maybe": "△", "drop": "✗"}.get(result["decision"], "?")
+            print(
+                f"  Scene {scene.index:3d} | {scene.start} ~ {scene.end} "
+                f"| {decision_mark} {result['decision'].upper():5s} "
+                f"| final={result['final_score']:.1f} "
+                f"| {result['detected_subject']}"
+                f"| {result['reason']}"
+            )
+
+    return [results_map[scene.index] for scene in scenes]
+
+
+def _build_grid_image(scenes: List[Scene]) -> Image.Image:
+    n_cols = max((len(s.frame_paths) for s in scenes), default=3)
+    n_cols = max(n_cols, 1)
+
+    row_w = _CELL_PAD + n_cols * (_THUMB_W + _CELL_PAD)
+    row_h = _LABEL_H + _THUMB_H + _CELL_PAD
+    canvas = Image.new("RGB", (row_w, _CELL_PAD + len(scenes) * row_h), (24, 24, 24))
+    draw = ImageDraw.Draw(canvas)
+    font = _load_grid_font(13)
+
+    for row_idx, scene in enumerate(scenes):
+        y = _CELL_PAD + row_idx * row_h
+        duration = scene.end_sec - scene.start_sec
+        label = f"Scene {scene.index} | {scene.start} ~ {scene.end} | {duration:.1f}s"
+        draw.rectangle([_CELL_PAD, y, row_w - _CELL_PAD, y + _LABEL_H - 2], fill=(48, 48, 48))
+        draw.text((_CELL_PAD + 6, y + 8), label, font=font, fill=(220, 220, 220))
+
+        for col_idx, path in enumerate(scene.frame_paths[:n_cols]):
+            x = _CELL_PAD + col_idx * (_THUMB_W + _CELL_PAD)
+            fy = y + _LABEL_H
+            try:
+                thumb = Image.open(path).convert("RGB")
+                thumb = thumb.resize((_THUMB_W, _THUMB_H), Image.LANCZOS)
+                canvas.paste(thumb, (x, fy))
+            except Exception:
+                pass
+
+    # 너무 크면 Gemini 전송용으로 축소
+    canvas.thumbnail((2048, 2048), Image.LANCZOS)
+    return canvas
+
+
+def _build_grid_contents(
+    grid_img: Image.Image,
+    master_prompt: str,
+    subject_section: str,
+    scenes: List[Scene],
+) -> list:
+    buf = io.BytesIO()
+    grid_img.save(buf, format="JPEG", quality=85)
+
+    scene_meta = "\n".join(
+        f"- Scene {s.index}: {s.start} ~ {s.end} ({s.end_sec - s.start_sec:.1f}s)"
+        for s in scenes
+    )
+
+    prompt = (
+        f"{master_prompt}\n\n"
+        f"---\n\n"
+        f"{subject_section}\n\n"
+        f"---\n\n"
+        f"위 이미지는 영상에서 추출한 {len(scenes)}개 장면의 그리드다.\n"
+        f"각 행이 하나의 장면이며, 행 상단 라벨에 Scene 번호가 표시되어 있다.\n"
+        f"전체 흐름과 장면 간 맥락을 고려해 상대적으로 평가해라.\n\n"
+        f"장면 목록:\n{scene_meta}\n\n"
+        f"각 장면을 순서대로 분석해 아래 JSON 배열로 응답해라 (원소 수: 반드시 {len(scenes)}개):\n"
+        f'[{{"scene": N, '
+        f'"detected_subject": "사람|동물|풍경/공간|음식/음료|이동수단|사물/활동|unknown", '
+        f'"secondary_subject": "사람|동물|...|null", '
+        f'"applied_criteria": "...", '
+        f'"general_drop": true|false, '
+        f'"general_drop_reason": "...|null", '
+        f'"quality_score": 1~5, "visual_score": 1~5, '
+        f'"reason": "이유 한 줄 (한국어)"}}, ...]'
+    )
+
+    parts = [
+        types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
+        types.Part.from_text(text=prompt),
+    ]
+    return [types.Content(role="user", parts=parts)]
+
+
+def _parse_grid_response(text: str, scenes: List[Scene]) -> List[dict]:
+    fallback_item = {
+        "detected_subject": "unknown",
+        "secondary_subject": None,
+        "applied_criteria": "",
+        "general_drop": False,
+        "general_drop_reason": None,
+        "quality_score": 3.0,
+        "visual_score": 2.0,
+        "reason": "응답 파싱 실패",
+    }
+    fallback = [fallback_item.copy() for _ in scenes]
+
+    try:
+        data = json.loads(text.strip())
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            print(f"  [경고] 그리드 응답이 배열이 아님: {text[:200]}")
+            return fallback
+
+        results = []
+        for item in data:
+            try:
+                results.append(_validate(item))
+            except Exception:
+                results.append(fallback_item.copy())
+
+        while len(results) < len(scenes):
+            results.append(fallback_item.copy())
+        return results[:len(scenes)]
+    except Exception:
+        print(f"  [경고] 그리드 응답 JSON 파싱 실패. 원본:\n{text[:500]}")
+        return fallback
+
+
+def _load_grid_font(size: int):
+    candidates = [
+        "C:/Windows/Fonts/consola.ttf",
+        "C:/Windows/Fonts/cour.ttf",
+        "C:/Windows/Fonts/arial.ttf",
+    ]
+    for path in candidates:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except Exception:
+                continue
+    return ImageFont.load_default()

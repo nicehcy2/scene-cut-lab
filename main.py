@@ -18,7 +18,7 @@ import time
 
 import config
 from pipeline.scene_detector import detect_scenes, Scene
-from pipeline.gemini_scorer import score_scenes
+from pipeline.gemini_scorer import score_scenes, score_scenes_grid
 from pipeline.highlight_selector import select_top
 from pipeline.video_exporter import export_highlight
 from pipeline.meta_extractor import compute_meta
@@ -54,6 +54,10 @@ def parse_args():
                         help="결과 JSON 저장 경로 (기본값: 표준출력)")
     parser.add_argument("--keep-only", action="store_true",
                         help="keep 장면만 포함 (maybe 제외)")
+    parser.add_argument("--maybe-min-score", type=float, default=config.MAYBE_MIN_SCORE,
+                        help=f"maybe 포함 최소 점수 (기본값: {config.MAYBE_MIN_SCORE}, 범위: 0~5)")
+    parser.add_argument("--mode", default="parallel", choices=["parallel", "grid"],
+                        help="Gemini 호출 방식: parallel=병렬 개별(기본), grid=그리드 맥락")
     return parser.parse_args()
 
 
@@ -116,7 +120,7 @@ def run_from_scores(args):
     top_label = f"상위 {args.top_n}개" if args.top_n > 0 else "전체"
     print(f"[2/3] 장면 선택 중 ({top_label})...")
     t0 = time.time()
-    highlights = select_top(scored, args.top_n, keep_only=args.keep_only)
+    highlights = select_top(scored, args.top_n, keep_only=args.keep_only, maybe_min_score=args.maybe_min_score)
     print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨")
     for h in highlights:
         print(f"  Scene {h['scene']:3d} | {h['start']} ~ {h['end']} | score={h.get('final_score', '?')}")
@@ -147,20 +151,30 @@ def run_full_auto(args):
     scenes = detect_scenes(args.video, args.frames_per_scene, args.frames_dir)
     print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
-    print(f"[2/4] Gemini 하이라이트 점수 계산 중{subject_label}...")
+    mode_label = "그리드" if args.mode == "grid" else "병렬"
+    print(f"[2/4] Gemini 하이라이트 점수 계산 중{subject_label} [{mode_label}]...")
     t0 = time.time()
-    scored = score_scenes(
-        scenes,
-        master_prompt=config.MASTER_PROMPT,
-        subject_prompts=config.SUBJECT_PROMPTS,
-        model_name=args.model,
-        subject=args.subject,
-    )
+    if args.mode == "grid":
+        scored = score_scenes_grid(
+            scenes,
+            master_prompt=config.MASTER_PROMPT,
+            subject_prompts=config.SUBJECT_PROMPTS,
+            model_name=args.model,
+            subject=args.subject,
+        )
+    else:
+        scored = score_scenes(
+            scenes,
+            master_prompt=config.MASTER_PROMPT,
+            subject_prompts=config.SUBJECT_PROMPTS,
+            model_name=args.model,
+            subject=args.subject,
+        )
     print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
     print(f"[3/4] 상위 {args.top_n}개 장면 선택 중...")
     t0 = time.time()
-    highlights = select_top(scored, args.top_n, keep_only=args.keep_only)
+    highlights = select_top(scored, args.top_n, keep_only=args.keep_only, maybe_min_score=args.maybe_min_score)
     print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
     if args.export:
