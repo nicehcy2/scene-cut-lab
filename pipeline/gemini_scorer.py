@@ -152,7 +152,8 @@ def _call_gemini(client: genai.Client, model_name: str, contents: list, max_retr
                 model=model_name,
                 contents=contents,
                 config=types.GenerateContentConfig(
-                    response_mime_type="application/json"
+                    response_mime_type="application/json",
+                    thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
             return response.text
