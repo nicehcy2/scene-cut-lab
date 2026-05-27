@@ -343,6 +343,7 @@ def score_scenes_grid(
     model_name: str,
     subject: Optional[str] = None,
     chunk_size: int = 12,
+    grids_dir: Optional[str] = None,
 ) -> List[dict]:
     """그리드 방식: chunk_size개 장면을 이미지 1장으로 묶어 Gemini에 전송.
     맥락 파악 가능, API 호출 횟수 = ceil(장면 수 / chunk_size).
@@ -364,9 +365,17 @@ def score_scenes_grid(
     results_map: dict = {}
     chunks = [scenes[i:i + chunk_size] for i in range(0, len(scenes), chunk_size)]
 
+    if grids_dir:
+        os.makedirs(grids_dir, exist_ok=True)
+
     for chunk_idx, chunk in enumerate(chunks):
         print(f"  [그리드 {chunk_idx + 1}/{len(chunks)}] Scene {chunk[0].index}~{chunk[-1].index} 분석 중...")
         grid_img = _build_grid_image(chunk)
+
+        if grids_dir:
+            grid_path = os.path.join(grids_dir, f"grid_{chunk[0].index:03d}_{chunk[-1].index:03d}.jpg")
+            grid_img.save(grid_path, format="JPEG", quality=85)
+
         contents = _build_grid_contents(grid_img, master_prompt, subject_section, chunk)
         response_text = _call_gemini(client, model_name, contents)
         parsed_by_scene = _parse_grid_response(response_text, chunk)
@@ -415,12 +424,12 @@ def _build_grid_image(scenes: List[Scene]) -> Image.Image:
             fy = y + _LABEL_H
             try:
                 thumb = Image.open(path).convert("RGB")
-                thumb = thumb.resize((_THUMB_W, _THUMB_H), Image.LANCZOS)
+                # TODO: 해상도가 다른 영상이 섞이면 셀 높이가 불균일해질 수 있음
+                thumb.thumbnail((_THUMB_W, _THUMB_H), Image.LANCZOS)
                 canvas.paste(thumb, (x, fy))
             except Exception:
                 pass
 
-    # 너무 크면 Gemini 전송용으로 축소
     canvas.thumbnail((2048, 2048), Image.LANCZOS)
     return canvas
 

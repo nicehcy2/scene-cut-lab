@@ -153,6 +153,7 @@ def run_from_scores(args, run_dir):
 def run_full_auto(args, run_dir):
     total_start = time.time()
     frames_dir = os.path.join(run_dir, "frames")
+    grids_dir = os.path.join(run_dir, "grids")
     subject_label = f" [{args.subject}]" if args.subject else " [자동 감지]"
     mode_label = "그리드" if args.mode == "grid" else "병렬"
 
@@ -171,6 +172,7 @@ def run_full_auto(args, run_dir):
             subject_prompts=config.SUBJECT_PROMPTS,
             model_name=args.model,
             subject=args.subject,
+            grids_dir=grids_dir,
         )
     else:
         scored = score_scenes(
