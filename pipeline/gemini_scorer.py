@@ -156,6 +156,8 @@ def _call_gemini(client: genai.Client, model_name: str, contents: list, max_retr
                     thinking_config=types.ThinkingConfig(thinking_budget=0),
                 ),
             )
+            u = response.usage_metadata
+            print(f"  [토큰] input={u.prompt_token_count}, output={u.candidates_token_count}, thinking={u.thoughts_token_count}")
             return response.text
         except Exception as e:
             err_str = str(e)
