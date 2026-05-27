@@ -63,8 +63,8 @@ def parse_args():
                         help="keep 장면만 포함 (maybe 제외)")
     parser.add_argument("--maybe-min-score", type=float, default=config.MAYBE_MIN_SCORE,
                         help=f"maybe 포함 최소 점수 (기본값: {config.MAYBE_MIN_SCORE}, 범위: 0~5)")
-    parser.add_argument("--mode", default="parallel", choices=["parallel", "grid"],
-                        help="Gemini 호출 방식: parallel=병렬 개별(기본), grid=그리드 맥락")
+    parser.add_argument("--mode", default="grid", choices=["parallel", "grid"],
+                        help="Gemini 호출 방식: grid=그리드 맥락(기본), parallel=병렬 개별")
     return parser.parse_args()
 
 
