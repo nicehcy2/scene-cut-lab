@@ -369,9 +369,16 @@ def score_scenes_grid(
         grid_img = _build_grid_image(chunk)
         contents = _build_grid_contents(grid_img, master_prompt, subject_section, chunk)
         response_text = _call_gemini(client, model_name, contents)
-        parsed_list = _parse_grid_response(response_text, chunk)
+        parsed_by_scene = _parse_grid_response(response_text, chunk)
+        fallback_parsed = {
+            "detected_subject": "unknown", "secondary_subject": None,
+            "applied_criteria": "", "general_drop": False,
+            "general_drop_reason": None, "quality_score": 3.0,
+            "visual_score": 2.0, "reason": "응답 파싱 실패",
+        }
 
-        for scene, parsed in zip(chunk, parsed_list):
+        for scene in chunk:
+            parsed = parsed_by_scene.get(scene.index, fallback_parsed)
             result = _make_result(scene, parsed)
             results_map[scene.index] = result
             decision_mark = {"keep": "✓", "maybe": "△", "drop": "✗"}.get(result["decision"], "?")
@@ -459,7 +466,7 @@ def _build_grid_contents(
     return [types.Content(role="user", parts=parts)]
 
 
-def _parse_grid_response(text: str, scenes: List[Scene]) -> List[dict]:
+def _parse_grid_response(text: str, scenes: List[Scene]) -> dict:
     fallback_item = {
         "detected_subject": "unknown",
         "secondary_subject": None,
@@ -470,7 +477,6 @@ def _parse_grid_response(text: str, scenes: List[Scene]) -> List[dict]:
         "visual_score": 2.0,
         "reason": "응답 파싱 실패",
     }
-    fallback = [fallback_item.copy() for _ in scenes]
 
     try:
         data = json.loads(text.strip())
@@ -478,21 +484,30 @@ def _parse_grid_response(text: str, scenes: List[Scene]) -> List[dict]:
             data = [data]
         if not isinstance(data, list):
             print(f"  [경고] 그리드 응답이 배열이 아님: {text[:200]}")
-            return fallback
+            return {s.index: fallback_item.copy() for s in scenes}
 
-        results = []
+        parsed_by_scene = {}
         for item in data:
+            scene_no = item.get("scene")
             try:
-                results.append(_validate(item))
+                parsed = _validate(item)
             except Exception:
-                results.append(fallback_item.copy())
+                parsed = fallback_item.copy()
+            if scene_no is not None:
+                parsed_by_scene[int(scene_no)] = parsed
 
-        while len(results) < len(scenes):
-            results.append(fallback_item.copy())
-        return results[:len(scenes)]
+        # scene 번호가 없는 응답은 순서 기반으로 폴백
+        if not parsed_by_scene:
+            for scene, item in zip(scenes, data):
+                try:
+                    parsed_by_scene[scene.index] = _validate(item)
+                except Exception:
+                    parsed_by_scene[scene.index] = fallback_item.copy()
+
+        return parsed_by_scene
     except Exception:
         print(f"  [경고] 그리드 응답 JSON 파싱 실패. 원본:\n{text[:500]}")
-        return fallback
+        return {s.index: fallback_item.copy() for s in scenes}
 
 
 def _load_grid_font(size: int):
