@@ -63,8 +63,8 @@ def parse_args():
                         help="keep 장면만 포함 (maybe 제외)")
     parser.add_argument("--maybe-min-score", type=float, default=config.MAYBE_MIN_SCORE,
                         help=f"maybe 포함 최소 점수 (기본값: {config.MAYBE_MIN_SCORE}, 범위: 0~5)")
-    parser.add_argument("--mode", default="parallel", choices=["parallel", "grid"],
-                        help="Gemini 호출 방식: parallel=병렬 개별(기본), grid=그리드 맥락")
+    parser.add_argument("--mode", default="grid", choices=["parallel", "grid"],
+                        help="Gemini 호출 방식: grid=그리드 맥락(기본), parallel=병렬 개별")
     return parser.parse_args()
 
 
@@ -153,6 +153,7 @@ def run_from_scores(args, run_dir):
 def run_full_auto(args, run_dir):
     total_start = time.time()
     frames_dir = os.path.join(run_dir, "frames")
+    grids_dir = os.path.join(run_dir, "grids")
     subject_label = f" [{args.subject}]" if args.subject else " [자동 감지]"
     mode_label = "그리드" if args.mode == "grid" else "병렬"
 
@@ -171,6 +172,7 @@ def run_full_auto(args, run_dir):
             subject_prompts=config.SUBJECT_PROMPTS,
             model_name=args.model,
             subject=args.subject,
+            grids_dir=grids_dir,
         )
     else:
         scored = score_scenes(
