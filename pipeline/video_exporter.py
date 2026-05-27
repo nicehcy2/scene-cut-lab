@@ -18,6 +18,9 @@ def export_highlight(
     """하이라이트 장면을 잘라 하나의 mp4로 합친 뒤 output_path에 저장한다."""
     ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
 
+    if not highlights:
+        raise ValueError("선택된 장면이 없습니다. --keep-only 제거 또는 점수 기준을 낮춰보세요.")
+
     with tempfile.TemporaryDirectory() as tmp_dir:
         segment_paths = _cut_segments(ffmpeg, video_path, highlights, tmp_dir)
         _concat_segments(ffmpeg, segment_paths, output_path)

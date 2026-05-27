@@ -2,6 +2,7 @@
 PySceneDetect로 장면 경계 감지 + 대표 프레임 추출
 """
 import os
+import time
 from dataclasses import dataclass
 from typing import List
 
@@ -24,25 +25,31 @@ def detect_scenes(video_path: str, frames_per_scene: int, frames_dir: str) -> Li
 
     os.makedirs(frames_dir, exist_ok=True)
 
+    t0 = time.time()
     scene_list = detect(video_path, ContentDetector())
     if not scene_list:
         raise RuntimeError("감지된 장면이 없습니다. 영상 파일을 확인하세요.")
+    print(f"[SceneDetect] 장면 감지 완료 ({time.time() - t0:.1f}s) — {len(scene_list)}개 장면")
 
-    print(f"[SceneDetect] {len(scene_list)}개 장면 감지됨")
-
-    # {Scene: [frame_path, ...]} 형태로 반환
+    t0 = time.time()
     scene_to_paths = save_images(
         scene_list,
         open_video(video_path),
         num_images=frames_per_scene,
         output_dir=frames_dir,
     )
+    print(f"[SceneDetect] 프레임 추출 완료 ({time.time() - t0:.1f}s)")
 
     scenes = []
     for i, scene in enumerate(scene_list):
         start_tc, end_tc = scene
         raw_paths = scene_to_paths.get(i, [])
         frame_paths = [os.path.join(frames_dir, p) for p in raw_paths]
+        duration = end_tc.get_seconds() - start_tc.get_seconds()
+        print(
+            f"  Scene {i + 1:3d} | {start_tc.get_timecode()} ~ {end_tc.get_timecode()} "
+            f"| {duration:.1f}s | 프레임 {len(frame_paths)}장"
+        )
         scenes.append(Scene(
             index=i + 1,
             start=start_tc.get_timecode(),
