@@ -94,6 +94,28 @@ def score_scenes(
     return [results_map[scene.index] for scene in scenes]
 
 
+_MAX_SIDE = 1280   # 원본 이미지 최대 해상도 (배치 전송 시)
+
+
+def _pick_representative_frame(scene: Scene) -> Optional[str]:
+    """장면에서 대표 프레임 1장을 선택한다.
+
+    품질 필터 통과한 첫 번째 프레임 반환.
+    전부 필터링되면 frame_paths 가운데 인덱스 반환 (최소 1장 보장).
+    frame_paths가 비어 있으면 None 반환.
+    """
+    if not scene.frame_paths:
+        return None
+    valid = filter_frames(
+        scene.frame_paths,
+        blur_threshold=config.BLUR_THRESHOLD,
+        dark_threshold=config.DARK_THRESHOLD,
+    )
+    if valid:
+        return valid[0]
+    return scene.frame_paths[len(scene.frame_paths) // 2]
+
+
 def _build_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -160,7 +182,7 @@ def _call_gemini(client: genai.Client, model_name: str, contents: list, max_retr
             )
             u = response.usage_metadata
             print(f"  [토큰] input={u.prompt_token_count}, output={u.candidates_token_count}, thinking={u.thoughts_token_count}")
-            return response.text
+            return response.text or ""
         except Exception as e:
             err_str = str(e)
             is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
@@ -343,10 +365,11 @@ def score_scenes_grid(
     model_name: str,
     subject: Optional[str] = None,
     chunk_size: int = 12,
-    grids_dir: Optional[str] = None,
+    grids_dir: Optional[str] = None,  # 하위 호환용 (더 이상 사용 안 함)
 ) -> List[dict]:
-    """그리드 방식: chunk_size개 장면을 이미지 1장으로 묶어 Gemini에 전송.
-    맥락 파악 가능, API 호출 횟수 = ceil(장면 수 / chunk_size).
+    """배치 방식: chunk_size개 장면의 원본 이미지를 묶어 Gemini에 전송.
+    장면당 대표 프레임 1장, 이미지-메타 인터리브 방식.
+    API 호출 횟수 = ceil(장면 수 / chunk_size).
     """
     client = _build_client()
 
@@ -364,29 +387,34 @@ def score_scenes_grid(
 
     results_map: dict = {}
     chunks = [scenes[i:i + chunk_size] for i in range(0, len(scenes), chunk_size)]
-
-    if grids_dir:
-        os.makedirs(grids_dir, exist_ok=True)
+    fallback_parsed = {
+        "detected_subject": "unknown", "secondary_subject": None,
+        "applied_criteria": "", "general_drop": False,
+        "general_drop_reason": None, "quality_score": 3.0,
+        "visual_score": 2.0, "reason": "응답 파싱 실패",
+    }
 
     for chunk_idx, chunk in enumerate(chunks):
-        print(f"  [그리드 {chunk_idx + 1}/{len(chunks)}] Scene {chunk[0].index}~{chunk[-1].index} 분석 중...")
-        grid_img = _build_grid_image(chunk)
+        print(f"  [배치 {chunk_idx + 1}/{len(chunks)}] Scene {chunk[0].index}~{chunk[-1].index} 분석 중...")
 
-        if grids_dir:
-            grid_path = os.path.join(grids_dir, f"grid_{chunk[0].index:03d}_{chunk[-1].index:03d}.jpg")
-            grid_img.save(grid_path, format="JPEG", quality=85)
-
-        contents = _build_grid_contents(grid_img, master_prompt, subject_section, chunk)
-        response_text = _call_gemini(client, model_name, contents)
-        parsed_by_scene = _parse_grid_response(response_text, chunk)
-        fallback_parsed = {
-            "detected_subject": "unknown", "secondary_subject": None,
-            "applied_criteria": "", "general_drop": False,
-            "general_drop_reason": None, "quality_score": 3.0,
-            "visual_score": 2.0, "reason": "응답 파싱 실패",
-        }
-
+        # 장면별 대표 프레임 1장 선택
+        batch = []
         for scene in chunk:
+            frame_path = _pick_representative_frame(scene)
+            if frame_path is None:
+                print(f"  [경고] Scene {scene.index}: 프레임 없음 → DROP")
+                results_map[scene.index] = _make_fallback(scene)
+            else:
+                batch.append((scene, frame_path))
+
+        if not batch:
+            continue
+
+        contents = _build_batch_contents(batch, master_prompt, subject_section)
+        response_text = _call_gemini(client, model_name, contents)
+        parsed_by_scene = _parse_grid_response(response_text, [s for s, _ in batch])
+
+        for scene, _ in batch:
             parsed = parsed_by_scene.get(scene.index, fallback_parsed)
             result = _make_result(scene, parsed)
             results_map[scene.index] = result
@@ -400,6 +428,60 @@ def score_scenes_grid(
             )
 
     return [results_map[scene.index] for scene in scenes]
+
+
+def _build_batch_contents(
+    batch: List[tuple],   # (scene, frame_path)
+    master_prompt: str,
+    subject_section: str,
+) -> list:
+    """N장면 배치 호출 컨텐츠 생성 (원본 이미지 인터리브 방식).
+
+    구조:
+      [도입 텍스트] [이미지1][Scene 1 메타] [이미지2][Scene 2 메타] ... [분석 지시]
+    """
+    parts = []
+
+    intro = (
+        f"{master_prompt}\n\n"
+        f"---\n\n"
+        f"{subject_section}\n\n"
+        f"---\n\n"
+        f"아래 {len(batch)}개 장면을 순서대로 분석해라.\n"
+        f"각 장면은 [이미지] → [장면 정보] 순으로 제공된다.\n"
+        f"전체 흐름과 장면 간 맥락을 고려해 상대적으로 평가해라.\n\n"
+    )
+    parts.append(types.Part.from_text(text=intro))
+
+    for scene, frame_path in batch:
+        img = Image.open(frame_path).convert("RGB")
+        img.thumbnail((_MAX_SIDE, _MAX_SIDE), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+
+        duration = scene.end_sec - scene.start_sec
+        meta = (
+            f"[Scene {scene.index}] {scene.start} ~ {scene.end} | {duration:.1f}s\n"
+        )
+        parts.append(types.Part.from_text(text=meta))
+
+    n = len(batch)
+    instruction = (
+        f"\n위 {n}개 장면 각각에 대해 STEP 1~3을 수행해라.\n"
+        f"반드시 아래 JSON 배열로만 응답해라 (원소 수: 정확히 {n}개, JSON 외 텍스트 없음):\n"
+        f'[{{"scene": N, '
+        f'"detected_subject": "사람|동물|풍경/공간|음식/음료|이동수단|사물/활동|unknown", '
+        f'"secondary_subject": "사람|동물|...|null", '
+        f'"applied_criteria": "...", '
+        f'"general_drop": true|false, '
+        f'"general_drop_reason": "...|null", '
+        f'"quality_score": 1~5, "visual_score": 1~5, '
+        f'"reason": "이유 한 줄 (한국어)"}}, ...]'
+    )
+    parts.append(types.Part.from_text(text=instruction))
+
+    return [types.Content(role="user", parts=parts)]
 
 
 def _build_grid_image(scenes: List[Scene]) -> Image.Image:
@@ -486,6 +568,10 @@ def _parse_grid_response(text: str, scenes: List[Scene]) -> dict:
         "visual_score": 2.0,
         "reason": "응답 파싱 실패",
     }
+
+    if not text:
+        print(f"  [경고] 응답이 비어있음 — fallback 처리")
+        return {s.index: fallback_item.copy() for s in scenes}
 
     try:
         data = json.loads(text.strip())
