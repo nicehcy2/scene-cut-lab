@@ -15,7 +15,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 from google import genai
 from google.genai import types
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 
 import config
 from pipeline.frame_filter import filter_frames
@@ -94,6 +94,28 @@ def score_scenes(
     return [results_map[scene.index] for scene in scenes]
 
 
+_MAX_SIDE = 1280   # 원본 이미지 최대 해상도 (배치 전송 시)
+
+
+def _pick_representative_frame(scene: Scene) -> Optional[str]:
+    """장면에서 대표 프레임 1장을 선택한다.
+
+    품질 필터 통과한 첫 번째 프레임 반환.
+    전부 필터링되면 frame_paths 가운데 인덱스 반환 (최소 1장 보장).
+    frame_paths가 비어 있으면 None 반환.
+    """
+    if not scene.frame_paths:
+        return None
+    valid = filter_frames(
+        scene.frame_paths,
+        blur_threshold=config.BLUR_THRESHOLD,
+        dark_threshold=config.DARK_THRESHOLD,
+    )
+    if valid:
+        return valid[0]
+    return scene.frame_paths[len(scene.frame_paths) // 2]
+
+
 def _build_client() -> genai.Client:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -160,7 +182,7 @@ def _call_gemini(client: genai.Client, model_name: str, contents: list, max_retr
             )
             u = response.usage_metadata
             print(f"  [토큰] input={u.prompt_token_count}, output={u.candidates_token_count}, thinking={u.thoughts_token_count}")
-            return response.text
+            return response.text or ""
         except Exception as e:
             err_str = str(e)
             is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
@@ -327,13 +349,8 @@ def _make_fallback(scene: Scene) -> dict:
 
 
 # ──────────────────────────────────────────────
-# 그리드 방식 (맥락 파악용)
+# 배치 방식 (이미지 인터리브, 맥락 파악용)
 # ──────────────────────────────────────────────
-
-_THUMB_W = 480
-_THUMB_H = 270
-_LABEL_H = 32
-_CELL_PAD = 4
 
 
 def score_scenes_grid(
@@ -343,10 +360,11 @@ def score_scenes_grid(
     model_name: str,
     subject: Optional[str] = None,
     chunk_size: int = 12,
-    grids_dir: Optional[str] = None,
+    grids_dir: Optional[str] = None,  # 하위 호환용 (더 이상 사용 안 함)
 ) -> List[dict]:
-    """그리드 방식: chunk_size개 장면을 이미지 1장으로 묶어 Gemini에 전송.
-    맥락 파악 가능, API 호출 횟수 = ceil(장면 수 / chunk_size).
+    """배치 방식: chunk_size개 장면의 원본 이미지를 묶어 Gemini에 전송.
+    장면당 대표 프레임 1장, 이미지-메타 인터리브 방식.
+    API 호출 횟수 = ceil(장면 수 / chunk_size).
     """
     client = _build_client()
 
@@ -364,10 +382,6 @@ def score_scenes_grid(
 
     results_map: dict = {}
     chunks = [scenes[i:i + chunk_size] for i in range(0, len(scenes), chunk_size)]
-
-    if grids_dir:
-        os.makedirs(grids_dir, exist_ok=True)
-
     fallback_parsed = {
         "detected_subject": "unknown", "secondary_subject": None,
         "applied_criteria": "", "general_drop": False,
@@ -376,38 +390,26 @@ def score_scenes_grid(
     }
 
     for chunk_idx, chunk in enumerate(chunks):
-        print(f"  [그리드 {chunk_idx + 1}/{len(chunks)}] Scene {chunk[0].index}~{chunk[-1].index} 분석 중...")
+        print(f"  [배치 {chunk_idx + 1}/{len(chunks)}] Scene {chunk[0].index}~{chunk[-1].index} 분석 중...")
 
-        # 유효 프레임 필터링 — 병렬 모드와 동일한 기준 적용
-        valid_paths_map: dict = {}
-        grid_scenes = []
+        # 장면별 대표 프레임 1장 선택
+        batch = []
         for scene in chunk:
-            valid = filter_frames(
-                scene.frame_paths,
-                blur_threshold=config.BLUR_THRESHOLD,
-                dark_threshold=config.DARK_THRESHOLD,
-            )
-            if not valid:
-                print(f"  [경고] Scene {scene.index}: 유효한 프레임 없음, DROP 처리")
+            frame_path = _pick_representative_frame(scene)
+            if frame_path is None:
+                print(f"  [경고] Scene {scene.index}: 프레임 없음 → DROP")
                 results_map[scene.index] = _make_fallback(scene)
             else:
-                valid_paths_map[scene.index] = valid
-                grid_scenes.append(scene)
+                batch.append((scene, frame_path))
 
-        if not grid_scenes:
+        if not batch:
             continue
 
-        grid_img = _build_grid_image(grid_scenes, valid_paths_map)
-
-        if grids_dir:
-            grid_path = os.path.join(grids_dir, f"grid_{grid_scenes[0].index:03d}_{grid_scenes[-1].index:03d}.jpg")
-            grid_img.save(grid_path, format="JPEG", quality=85)
-
-        contents = _build_grid_contents(grid_img, master_prompt, subject_section, grid_scenes)
+        contents = _build_batch_contents(batch, master_prompt, subject_section)
         response_text = _call_gemini(client, model_name, contents)
-        parsed_by_scene = _parse_grid_response(response_text, grid_scenes)
+        parsed_by_scene = _parse_grid_response(response_text, [s for s, _ in batch])
 
-        for scene in grid_scenes:
+        for scene, _ in batch:
             parsed = parsed_by_scene.get(scene.index, fallback_parsed)
             result = _make_result(scene, parsed)
             results_map[scene.index] = result
@@ -423,65 +425,41 @@ def score_scenes_grid(
     return [results_map[scene.index] for scene in scenes]
 
 
-def _build_grid_image(scenes: List[Scene], valid_paths_map: dict | None = None) -> Image.Image:
-    def _paths(s: Scene) -> List[str]:
-        return valid_paths_map.get(s.index, s.frame_paths) if valid_paths_map else s.frame_paths
-
-    n_cols = max((len(_paths(s)) for s in scenes), default=3)
-    n_cols = max(n_cols, 1)
-
-    row_w = _CELL_PAD + n_cols * (_THUMB_W + _CELL_PAD)
-    row_h = _LABEL_H + _THUMB_H + _CELL_PAD
-    canvas = Image.new("RGB", (row_w, _CELL_PAD + len(scenes) * row_h), (24, 24, 24))
-    draw = ImageDraw.Draw(canvas)
-    font = _load_grid_font(13)
-
-    for row_idx, scene in enumerate(scenes):
-        y = _CELL_PAD + row_idx * row_h
-        duration = scene.end_sec - scene.start_sec
-        label = f"Scene {scene.index} | {scene.start} ~ {scene.end} | {duration:.1f}s"
-        draw.rectangle([_CELL_PAD, y, row_w - _CELL_PAD, y + _LABEL_H - 2], fill=(48, 48, 48))
-        draw.text((_CELL_PAD + 6, y + 8), label, font=font, fill=(220, 220, 220))
-
-        for col_idx, path in enumerate(_paths(scene)[:n_cols]):
-            x = _CELL_PAD + col_idx * (_THUMB_W + _CELL_PAD)
-            fy = y + _LABEL_H
-            try:
-                thumb = Image.open(path).convert("RGB")
-                # TODO: 해상도가 다른 영상이 섞이면 셀 높이가 불균일해질 수 있음
-                thumb.thumbnail((_THUMB_W, _THUMB_H), Image.LANCZOS)
-                canvas.paste(thumb, (x, fy))
-            except Exception:
-                pass
-
-    canvas.thumbnail((2048, 2048), Image.LANCZOS)
-    return canvas
-
-
-def _build_grid_contents(
-    grid_img: Image.Image,
+def _build_batch_contents(
+    batch: List[tuple],   # (scene, frame_path)
     master_prompt: str,
     subject_section: str,
-    scenes: List[Scene],
 ) -> list:
-    buf = io.BytesIO()
-    grid_img.save(buf, format="JPEG", quality=85)
+    parts = []
 
-    scene_meta = "\n".join(
-        f"- Scene {s.index}: {s.start} ~ {s.end} ({s.end_sec - s.start_sec:.1f}s)"
-        for s in scenes
-    )
-
-    prompt = (
+    intro = (
         f"{master_prompt}\n\n"
         f"---\n\n"
         f"{subject_section}\n\n"
         f"---\n\n"
-        f"위 이미지는 영상에서 추출한 {len(scenes)}개 장면의 그리드다.\n"
-        f"각 행이 하나의 장면이며, 행 상단 라벨에 Scene 번호가 표시되어 있다.\n"
+        f"아래 {len(batch)}개 장면을 순서대로 분석해라.\n"
+        f"각 장면은 [이미지] → [장면 정보] 순으로 제공된다.\n"
         f"전체 흐름과 장면 간 맥락을 고려해 상대적으로 평가해라.\n\n"
-        f"장면 목록:\n{scene_meta}\n\n"
-        f"각 장면을 순서대로 분석해 아래 JSON 배열로 응답해라 (원소 수: 반드시 {len(scenes)}개):\n"
+    )
+    parts.append(types.Part.from_text(text=intro))
+
+    for scene, frame_path in batch:
+        img = Image.open(frame_path).convert("RGB")
+        img.thumbnail((_MAX_SIDE, _MAX_SIDE), Image.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        parts.append(types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"))
+
+        duration = scene.end_sec - scene.start_sec
+        meta = (
+            f"[Scene {scene.index}] {scene.start} ~ {scene.end} | {duration:.1f}s\n"
+        )
+        parts.append(types.Part.from_text(text=meta))
+
+    n = len(batch)
+    instruction = (
+        f"\n위 {n}개 장면 각각에 대해 STEP 1~3을 수행해라.\n"
+        f"반드시 아래 JSON 배열로만 응답해라 (원소 수: 정확히 {n}개, JSON 외 텍스트 없음):\n"
         f'[{{"scene": N, '
         f'"detected_subject": "사람|동물|풍경/공간|음식/음료|이동수단|사물/활동|unknown", '
         f'"secondary_subject": "사람|동물|...|null", '
@@ -491,11 +469,8 @@ def _build_grid_contents(
         f'"quality_score": 1~5, "visual_score": 1~5, '
         f'"reason": "이유 한 줄 (한국어)"}}, ...]'
     )
+    parts.append(types.Part.from_text(text=instruction))
 
-    parts = [
-        types.Part.from_bytes(data=buf.getvalue(), mime_type="image/jpeg"),
-        types.Part.from_text(text=prompt),
-    ]
     return [types.Content(role="user", parts=parts)]
 
 
@@ -510,6 +485,10 @@ def _parse_grid_response(text: str, scenes: List[Scene]) -> dict:
         "visual_score": 2.0,
         "reason": "응답 파싱 실패",
     }
+
+    if not text:
+        print(f"  [경고] 응답이 비어있음 — fallback 처리")
+        return {s.index: fallback_item.copy() for s in scenes}
 
     try:
         data = json.loads(text.strip())
@@ -539,16 +518,3 @@ def _parse_grid_response(text: str, scenes: List[Scene]) -> dict:
         return {s.index: fallback_item.copy() for s in scenes}
 
 
-def _load_grid_font(size: int):
-    candidates = [
-        "C:/Windows/Fonts/consola.ttf",
-        "C:/Windows/Fonts/cour.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                continue
-    return ImageFont.load_default()
