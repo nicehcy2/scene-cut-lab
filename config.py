@@ -325,5 +325,5 @@ DARK_THRESHOLD = 30.0    # 평균 밝기 (0-255) - 이하면 암부 처리
 MAYBE_MIN_SCORE = 3.2
 
 FRAMES_PER_SCENE = 3
-TOP_N = 5
+TOP_N = 0  # 0 = 제한 없음 (통과한 장면 전체 포함)
 FRAMES_DIR = "frames"

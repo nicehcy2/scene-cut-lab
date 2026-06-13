@@ -163,7 +163,7 @@ python main.py input.mp4 --export
 # 선택지: 사람, 동물, 풍경/공간, 음식/음료, 이동수단, 사물/활동
 python main.py input.mp4 --subject 사람 --export
 
-# 상위 3개만 추출
+# 상위 3개만 추출 (기본값 0 = 전체 포함)
 python main.py input.mp4 --top-n 3 --export
 
 # keep 장면만 포함 (maybe 제외)
@@ -255,7 +255,7 @@ DARK_THRESHOLD = 30.0    # 평균 밝기 (0-255). 이 값 미만이면 암부로
 ### 장면 선택 기준
 ```python
 MAYBE_MIN_SCORE = 3.2    # maybe 장면 포함 최소 점수
-TOP_N = 5                # 최종 반환할 하이라이트 장면 수
+TOP_N = 0                # 최종 반환할 하이라이트 장면 수 (0 = 통과한 장면 전체 포함)
 ```
 
 ### 기타

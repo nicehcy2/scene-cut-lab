@@ -49,7 +49,7 @@ def parse_args():
                         help=f"피사체 유형 (전체 자동 모드 전용). "
                              f"선택지: {', '.join(config.SUBJECT_CHOICES)}")
     parser.add_argument("--top-n", type=int, default=config.TOP_N,
-                        help=f"추출할 하이라이트 장면 수 (기본값: {config.TOP_N})")
+                        help="추출할 하이라이트 장면 수 (기본값: 0 = 통과한 장면 전체 포함)")
     parser.add_argument("--frames-per-scene", type=int, default=config.FRAMES_PER_SCENE,
                         help=f"장면당 추출 프레임 수 (기본값: {config.FRAMES_PER_SCENE})")
     parser.add_argument("--model", default=config.GEMINI_MODEL,
