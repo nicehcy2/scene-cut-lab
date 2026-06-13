@@ -1,14 +1,14 @@
 """
 영상 하이라이트 자동 추출 파이프라인
 
-[전체 자동 모드] — 기본. 장면 감지 + Gemini 점수화 + 하이라이트 선택 + (선택) 렌더링
-    python main.py input.mp4 --export
+[전체 자동 모드] — 기본. 장면 감지 + STT 전사 + Gemini 점수화 + 하이라이트 선택 + (선택) 렌더링
+    python main.py input.mp4
 
 [장면 감지만 실행] — Gemini 호출 없이 장면 분할과 그리드 이미지만 생성. 분할 결과 확인 용도
     python main.py input.mp4 --detect-only
 
 [선택/렌더링만 실행] — 전체 자동 모드로 생성된 results.json을 받아 top-N 조정이나 재렌더링
-    python main.py input.mp4 --from-scores runs/.../results.json --export
+    python main.py input.mp4 --from-scores runs/.../results.json
 """
 import argparse
 import json
@@ -19,7 +19,8 @@ from pathlib import Path
 
 import config
 from pipeline.scene_detector import detect_scenes
-from pipeline.gemini_scorer import score_scenes, score_scenes_grid
+from pipeline.gemini_scorer_v2 import score_scenes_v2
+from pipeline.stt import transcribe
 from pipeline.highlight_selector import select_top
 from pipeline.video_exporter import export_highlight
 from pipeline.inspect.meta_extractor import compute_meta
@@ -58,12 +59,18 @@ def parse_args():
                         help="하이라이트 영상 생성 건너뜀 (기본: 영상 생성)")
     parser.add_argument("--output", default=None, metavar="JSON_PATH",
                         help="결과 JSON 저장 경로 (기본값: runs/{영상명}_{시각}/results.json)")
-    parser.add_argument("--keep-only", action="store_true",
-                        help="keep 장면만 포함 (maybe 제외)")
+    parser.add_argument("--include-maybe", action="store_true",
+                        help="maybe 장면도 포함 (기본: keep 장면만)")
     parser.add_argument("--maybe-min-score", type=float, default=config.MAYBE_MIN_SCORE,
-                        help=f"maybe 포함 최소 점수 (기본값: {config.MAYBE_MIN_SCORE}, 범위: 0~5)")
-    parser.add_argument("--mode", default="batch", choices=["parallel", "batch"],
-                        help="Gemini 호출 방식: batch=배치 인터리브(기본), parallel=병렬 개별")
+                        help=f"maybe 포함 최소 점수 (기본값: {config.MAYBE_MIN_SCORE}, 범위: 0~100)")
+    parser.add_argument("--no-stt", action="store_true",
+                        help="STT 전사 건너뜀 (발화 정보 없이 시각 정보만으로 평가)")
+    parser.add_argument("--stt-model", default="small",
+                        choices=["tiny", "base", "small", "medium", "large-v3"],
+                        help="Whisper 모델 크기 (기본값: small / 한국어 브이로그 권장: medium)")
+    parser.add_argument("--style", default="장면 중심",
+                        choices=["장면 중심", "음성 중심", "균형"],
+                        help="점수 가중치 스타일 (기본값: 장면 중심)")
     return parser.parse_args()
 
 
@@ -127,7 +134,7 @@ def run_from_scores(args, run_dir):
     top_label = f"상위 {args.top_n}개" if args.top_n > 0 else "전체"
     print(f"[2/3] 장면 선택 중 ({top_label})...")
     t0 = time.time()
-    highlights = select_top(scored, args.top_n, keep_only=args.keep_only, maybe_min_score=args.maybe_min_score)
+    highlights = select_top(scored, args.top_n, keep_only=not args.include_maybe, maybe_min_score=args.maybe_min_score)
     print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨")
     for h in highlights:
         print(f"  Scene {h['scene']:3d} | {h['start']} ~ {h['end']} | score={h.get('final_score', '?')}")
@@ -148,45 +155,42 @@ def run_from_scores(args, run_dir):
 
 
 # ────────────────────────────────────────────────
-# 모드 3: 전체 자동 (Gemini)
+# 모드 3: 전체 자동 (Gemini + STT)
 # ────────────────────────────────────────────────
 def run_full_auto(args, run_dir):
     total_start = time.time()
     frames_dir = os.path.join(run_dir, "frames")
-    grids_dir = os.path.join(run_dir, "grids")
     subject_label = f" [{args.subject}]" if args.subject else " [자동 감지]"
-    mode_label = "배치" if args.mode == "batch" else "병렬"
 
     print(f"\n실행 디렉토리: {run_dir}")
-    print(f"\n[1/3] 장면 분할 중: {args.video}")
+    print(f"\n[1/4] 장면 분할 중: {args.video}")
     t0 = time.time()
     scenes = detect_scenes(args.video, args.frames_per_scene, frames_dir)
-    print(f"      완료 ({time.time() - t0:.1f}s)\n")
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(scenes)}개 장면\n")
 
-    print(f"[2/3] Gemini 하이라이트 점수 계산 중{subject_label} [{mode_label}]...")
-    t0 = time.time()
-    if args.mode == "batch":
-        scored = score_scenes_grid(
-            scenes,
-            master_prompt=config.MASTER_PROMPT,
-            subject_prompts=config.SUBJECT_PROMPTS,
-            model_name=args.model,
-            subject=args.subject,
-            grids_dir=grids_dir,
-        )
+    stt_segments = []
+    if args.no_stt:
+        print(f"[2/4] STT 전사 건너뜀 (--no-stt)\n")
     else:
-        scored = score_scenes(
-            scenes,
-            master_prompt=config.MASTER_PROMPT,
-            subject_prompts=config.SUBJECT_PROMPTS,
-            model_name=args.model,
-            subject=args.subject,
-        )
+        print(f"[2/4] STT 전사 중 (모델: {args.stt_model})...")
+        t0 = time.time()
+        stt_segments = transcribe(args.video, model_size=args.stt_model)
+        print(f"      완료 ({time.time() - t0:.1f}s)\n")
+
+    print(f"[3/4] Gemini 하이라이트 점수 계산 중{subject_label} [스타일: {args.style}]...")
+    t0 = time.time()
+    scored = score_scenes_v2(
+        scenes,
+        stt_segments=stt_segments,
+        model_name=args.model,
+        subject=args.subject,
+        style=args.style,
+    )
     print(f"      완료 ({time.time() - t0:.1f}s)\n")
 
-    print(f"[3/3] 장면 선택 중...")
+    print(f"[4/4] 장면 선택 중...")
     t0 = time.time()
-    highlights = select_top(scored, args.top_n, keep_only=args.keep_only, maybe_min_score=args.maybe_min_score)
+    highlights = select_top(scored, args.top_n, keep_only=not args.include_maybe, maybe_min_score=args.maybe_min_score)
     print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨\n")
 
     if not args.no_export:

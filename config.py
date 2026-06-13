@@ -329,8 +329,8 @@ SCENE_MIN_LEN_SEC = 2.0          # 최소 장면 길이(초). 이보다 짧은 �
 BLUR_THRESHOLD = 100.0   # Laplacian 분산 - 이하면 블러 처리
 DARK_THRESHOLD = 30.0    # 평균 밝기 (0-255) - 이하면 암부 처리
 
-# maybe 장면 포함 최소 점수 (2.5~3.4 범위에서 이 값 이상인 maybe만 포함)
-MAYBE_MIN_SCORE = 3.2
+# maybe 장면 포함 최소 점수 (0~100 범위, gemini_scorer_v2 기준)
+MAYBE_MIN_SCORE = 64
 
 FRAMES_PER_SCENE = 3
 TOP_N = 0  # 0 = 제한 없음 (통과한 장면 전체 포함)
