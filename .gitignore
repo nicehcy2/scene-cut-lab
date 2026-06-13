@@ -26,3 +26,5 @@ venv/
 .env
 
 *.zip
+
+models/
