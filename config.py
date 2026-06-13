@@ -317,6 +317,14 @@ STEP 2: 제너럴 DROP 통과 시
 # 피사체 선택지 (CLI --subject 인자에서 사용)
 SUBJECT_CHOICES = list(SUBJECT_PROMPTS.keys())  # ["사람", "동물", "풍경/공간", ...]
 
+# ──────────────────────────────────────────────
+# 장면 감지 (PySceneDetect ContentDetector) 튜닝
+#   과분할 심하면 → SCENE_THRESHOLD 올리기 (27 → 30 → 35)
+#   컷 누락 많으면 → SCENE_THRESHOLD 내리기 (27 → 20)
+# ──────────────────────────────────────────────
+SCENE_THRESHOLD = 15.0           # 픽셀 변화량 임계값 (기본값 27)
+SCENE_MIN_LEN_SEC = 2.0          # 최소 장면 길이(초). 이보다 짧은 컷은 병합
+
 # 프레임 품질 필터 임계값
 BLUR_THRESHOLD = 100.0   # Laplacian 분산 - 이하면 블러 처리
 DARK_THRESHOLD = 30.0    # 평균 밝기 (0-255) - 이하면 암부 처리

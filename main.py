@@ -54,16 +54,16 @@ def parse_args():
                         help=f"장면당 추출 프레임 수 (기본값: {config.FRAMES_PER_SCENE})")
     parser.add_argument("--model", default=config.GEMINI_MODEL,
                         help=f"Gemini 모델 (기본값: {config.GEMINI_MODEL})")
-    parser.add_argument("--export", action="store_true",
-                        help="하이라이트 영상 생성 (runs/{영상명}_{시각}/highlight.mp4)")
+    parser.add_argument("--no-export", action="store_true",
+                        help="하이라이트 영상 생성 건너뜀 (기본: 영상 생성)")
     parser.add_argument("--output", default=None, metavar="JSON_PATH",
                         help="결과 JSON 저장 경로 (기본값: runs/{영상명}_{시각}/results.json)")
     parser.add_argument("--keep-only", action="store_true",
                         help="keep 장면만 포함 (maybe 제외)")
     parser.add_argument("--maybe-min-score", type=float, default=config.MAYBE_MIN_SCORE,
                         help=f"maybe 포함 최소 점수 (기본값: {config.MAYBE_MIN_SCORE}, 범위: 0~5)")
-    parser.add_argument("--mode", default="grid", choices=["parallel", "grid"],
-                        help="Gemini 호출 방식: grid=그리드 맥락(기본), parallel=병렬 개별")
+    parser.add_argument("--mode", default="batch", choices=["parallel", "batch"],
+                        help="Gemini 호출 방식: batch=배치 인터리브(기본), parallel=병렬 개별")
     return parser.parse_args()
 
 
@@ -133,7 +133,7 @@ def run_from_scores(args, run_dir):
         print(f"  Scene {h['scene']:3d} | {h['start']} ~ {h['end']} | score={h.get('final_score', '?')}")
     print()
 
-    if args.export:
+    if not args.no_export:
         export_path = os.path.join(run_dir, "highlight.mp4")
         print(f"[3/3] 영상 합치는 중: {export_path}")
         t0 = time.time()
@@ -141,7 +141,7 @@ def run_from_scores(args, run_dir):
         size_mb = os.path.getsize(export_path) / (1024 * 1024)
         print(f"      완료 ({time.time() - t0:.1f}s) — {size_mb:.1f} MB\n")
     else:
-        print("[3/3] --export 미지정, 영상 파일 생성 건너뜀\n")
+        print("[3/3] --no-export 지정, 영상 파일 생성 건너뜀\n")
 
     print(f"총 처리 시간: {time.time() - total_start:.1f}s")
     _save(highlights, args.output or os.path.join(run_dir, "results.json"))
@@ -155,7 +155,7 @@ def run_full_auto(args, run_dir):
     frames_dir = os.path.join(run_dir, "frames")
     grids_dir = os.path.join(run_dir, "grids")
     subject_label = f" [{args.subject}]" if args.subject else " [자동 감지]"
-    mode_label = "그리드" if args.mode == "grid" else "병렬"
+    mode_label = "배치" if args.mode == "batch" else "병렬"
 
     print(f"\n실행 디렉토리: {run_dir}")
     print(f"\n[1/3] 장면 분할 중: {args.video}")
@@ -165,7 +165,7 @@ def run_full_auto(args, run_dir):
 
     print(f"[2/3] Gemini 하이라이트 점수 계산 중{subject_label} [{mode_label}]...")
     t0 = time.time()
-    if args.mode == "grid":
+    if args.mode == "batch":
         scored = score_scenes_grid(
             scenes,
             master_prompt=config.MASTER_PROMPT,
@@ -189,7 +189,7 @@ def run_full_auto(args, run_dir):
     highlights = select_top(scored, args.top_n, keep_only=args.keep_only, maybe_min_score=args.maybe_min_score)
     print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨\n")
 
-    if args.export:
+    if not args.no_export:
         export_path = os.path.join(run_dir, "highlight.mp4")
         print(f"[영상 합치기] {export_path}")
         t0 = time.time()
