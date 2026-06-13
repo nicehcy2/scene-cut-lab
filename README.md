@@ -59,14 +59,20 @@ python main.py input.mp4
 python main.py input.mp4 --export          # 하이라이트 영상 파일도 생성
 ```
 
-**2단계 분리 모드**
+**장면 감지만 실행 (`--detect-only`)**
 ```bash
-# 1단계: 장면 감지만 실행 → scenes.json 저장
 python main.py input.mp4 --detect-only
-
-# 2단계: scenes.json 기반으로 영상 합치기만 실행
-python main.py input.mp4 --from-scores runs/.../scenes.json --export
 ```
+Gemini 호출 없이 장면 분할과 그리드 이미지 생성만 수행한다.  
+`grids/` 폴더의 이미지로 장면 분할 결과를 확인한 뒤, 문제가 없으면 전체 자동 모드로 이어서 실행한다.  
+> `scenes.json`에는 점수 정보가 없으므로 `--from-scores`에 직접 넣을 수 없다.
+
+**선택/렌더링만 재실행 (`--from-scores`)**
+```bash
+# 전체 자동 모드로 생성된 results.json을 받아 top-n이나 임계값을 다르게 해서 재렌더링
+python main.py input.mp4 --from-scores runs/input_20260527_120000/results.json --top-n 3 --export
+```
+이미 Gemini 분석이 끝난 `results.json`을 재활용해 Gemini 재호출 없이 선택 기준만 바꿔 영상을 다시 생성한다.
 
 ---
 
@@ -173,11 +179,11 @@ python main.py input.mp4 --frames-per-scene 5
 # Gemini 모델 변경
 python main.py input.mp4 --model gemini-2.0-flash
 
-# 1단계만 실행 (장면 감지 + 프레임 추출)
+# 장면 감지만 실행 (Gemini 없음, 그리드 이미지 확인 후 전체 자동 모드로 이어서 실행)
 python main.py input.mp4 --detect-only
 
-# 저장된 scenes.json 기반으로 영상 합치기
-python main.py input.mp4 --from-scores runs/input_20260527_120000/scenes.json --export
+# 이미 분석된 results.json으로 top-n 조정 후 재렌더링 (Gemini 재호출 없음)
+python main.py input.mp4 --from-scores runs/input_20260527_120000/results.json --top-n 3 --export
 ```
 
 > `inputs/` 폴더 안에 영상을 넣으면 파일명만 입력해도 된다.  

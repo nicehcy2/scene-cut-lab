@@ -1,15 +1,14 @@
 """
 영상 하이라이트 자동 추출 파이프라인
 
-[전체 자동 모드]
+[전체 자동 모드] — 기본. 장면 감지 + Gemini 점수화 + 하이라이트 선택 + (선택) 렌더링
     python main.py input.mp4 --export
 
-[2단계 분리 모드]
-  1단계 - 장면 감지만 실행, JSON 저장:
+[장면 감지만 실행] — Gemini 호출 없이 장면 분할과 그리드 이미지만 생성. 분할 결과 확인 용도
     python main.py input.mp4 --detect-only
 
-  2단계 - scored.json으로 영상 합치기:
-    python main.py input.mp4 --from-scores runs/.../scenes.json --export
+[선택/렌더링만 실행] — 전체 자동 모드로 생성된 results.json을 받아 top-N 조정이나 재렌더링
+    python main.py input.mp4 --from-scores runs/.../results.json --export
 """
 import argparse
 import json
@@ -43,7 +42,7 @@ def parse_args():
     mode.add_argument("--detect-only", action="store_true",
                       help="장면 감지 + 프레임 추출만 실행하고 scenes.json 저장.")
     mode.add_argument("--from-scores", metavar="SCORED_JSON",
-                      help="점수 매긴 JSON 파일을 받아 선택 + 영상 합치기만 실행")
+                      help="전체 자동 모드로 생성된 results.json을 받아 선택 + 영상 합치기만 실행 (top-n 조정이나 재렌더링 용도)")
 
     parser.add_argument("--subject", default=None, choices=config.SUBJECT_CHOICES,
                         metavar="SUBJECT",
@@ -107,8 +106,9 @@ def run_detect_only(args, run_dir):
 
     json_path = args.output or os.path.join(run_dir, "scenes.json")
     _save(output_data, json_path)
-    print(f"\n점수를 채운 뒤 아래 명령으로 이어서 실행하세요:\n"
-          f"  python main.py \"{args.video}\" --from-scores {json_path} --export")
+    print(f"\ngrids/ 폴더의 그리드 이미지로 장면 분할 결과를 확인하세요.")
+    print(f"문제가 없으면 아래 명령으로 전체 분석을 이어서 실행하세요:")
+    print(f"  python main.py \"{args.video}\" --export")
 
 
 # ────────────────────────────────────────────────
