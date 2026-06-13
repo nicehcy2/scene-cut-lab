@@ -92,15 +92,17 @@ scene-cut-lab/
 │       ├── grids/                   # 그리드 이미지 (grid 모드 / --detect-only)
 │       ├── scenes.json              # --detect-only 결과
 │       └── results.json             # 최종 하이라이트 결과
-└── pipeline/
-    ├── scene_detector.py            # [1단계] 장면 분할 + 프레임 추출
-    ├── frame_filter.py              # [2단계] 블러/암부 프레임 필터
-    ├── gemini_scorer.py             # [3단계] Gemini 기반 하이라이트 스코어러
-    ├── highlight_selector.py        # [4단계] 상위 N개 선택
-    ├── video_exporter.py            # [선택] FFmpeg 영상 컷 편집 및 병합
-    ├── grid_builder.py              # 그리드 이미지 생성 (수동 리뷰용)
-    ├── meta_extractor.py            # 장면 메타데이터 계산 (블러/밝기/유사도)
-    └── clip_scorer_backup.py        # 이전 CLIP 스코어러 백업 (비활성)
+├── pipeline/
+│   ├── scene_detector.py            # [1단계] 장면 분할 + 프레임 추출
+│   ├── frame_filter.py              # [2단계] 블러/암부 프레임 필터
+│   ├── gemini_scorer.py             # [3단계] Gemini 기반 하이라이트 스코어러
+│   ├── highlight_selector.py        # [4단계] 상위 N개 선택
+│   ├── video_exporter.py            # [선택] FFmpeg 영상 컷 편집 및 병합
+│   └── inspect/                     # --detect-only 전용 (장면 감지 결과 검토용)
+│       ├── meta_extractor.py        # 장면 메타데이터 계산 (블러/밝기/유사도)
+│       └── grid_builder.py          # 그리드 이미지 생성 (수동 리뷰용)
+└── legacy/
+    └── clip_scorer_backup.py        # 이전 CLIP 스코어러 (비활성)
 ```
 
 ---

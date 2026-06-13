@@ -22,8 +22,8 @@ from pipeline.scene_detector import detect_scenes
 from pipeline.gemini_scorer import score_scenes, score_scenes_grid
 from pipeline.highlight_selector import select_top
 from pipeline.video_exporter import export_highlight
-from pipeline.meta_extractor import compute_meta
-from pipeline.grid_builder import build_grids
+from pipeline.inspect.meta_extractor import compute_meta
+from pipeline.inspect.grid_builder import build_grids
 
 
 def _make_run_dir(video_path: str) -> str:

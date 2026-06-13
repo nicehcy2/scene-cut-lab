@@ -368,25 +368,46 @@ def score_scenes_grid(
     if grids_dir:
         os.makedirs(grids_dir, exist_ok=True)
 
+    fallback_parsed = {
+        "detected_subject": "unknown", "secondary_subject": None,
+        "applied_criteria": "", "general_drop": False,
+        "general_drop_reason": None, "quality_score": 3.0,
+        "visual_score": 2.0, "reason": "응답 파싱 실패",
+    }
+
     for chunk_idx, chunk in enumerate(chunks):
         print(f"  [그리드 {chunk_idx + 1}/{len(chunks)}] Scene {chunk[0].index}~{chunk[-1].index} 분석 중...")
-        grid_img = _build_grid_image(chunk)
+
+        # 유효 프레임 필터링 — 병렬 모드와 동일한 기준 적용
+        valid_paths_map: dict = {}
+        grid_scenes = []
+        for scene in chunk:
+            valid = filter_frames(
+                scene.frame_paths,
+                blur_threshold=config.BLUR_THRESHOLD,
+                dark_threshold=config.DARK_THRESHOLD,
+            )
+            if not valid:
+                print(f"  [경고] Scene {scene.index}: 유효한 프레임 없음, DROP 처리")
+                results_map[scene.index] = _make_fallback(scene)
+            else:
+                valid_paths_map[scene.index] = valid
+                grid_scenes.append(scene)
+
+        if not grid_scenes:
+            continue
+
+        grid_img = _build_grid_image(grid_scenes, valid_paths_map)
 
         if grids_dir:
-            grid_path = os.path.join(grids_dir, f"grid_{chunk[0].index:03d}_{chunk[-1].index:03d}.jpg")
+            grid_path = os.path.join(grids_dir, f"grid_{grid_scenes[0].index:03d}_{grid_scenes[-1].index:03d}.jpg")
             grid_img.save(grid_path, format="JPEG", quality=85)
 
-        contents = _build_grid_contents(grid_img, master_prompt, subject_section, chunk)
+        contents = _build_grid_contents(grid_img, master_prompt, subject_section, grid_scenes)
         response_text = _call_gemini(client, model_name, contents)
-        parsed_by_scene = _parse_grid_response(response_text, chunk)
-        fallback_parsed = {
-            "detected_subject": "unknown", "secondary_subject": None,
-            "applied_criteria": "", "general_drop": False,
-            "general_drop_reason": None, "quality_score": 3.0,
-            "visual_score": 2.0, "reason": "응답 파싱 실패",
-        }
+        parsed_by_scene = _parse_grid_response(response_text, grid_scenes)
 
-        for scene in chunk:
+        for scene in grid_scenes:
             parsed = parsed_by_scene.get(scene.index, fallback_parsed)
             result = _make_result(scene, parsed)
             results_map[scene.index] = result
@@ -402,8 +423,11 @@ def score_scenes_grid(
     return [results_map[scene.index] for scene in scenes]
 
 
-def _build_grid_image(scenes: List[Scene]) -> Image.Image:
-    n_cols = max((len(s.frame_paths) for s in scenes), default=3)
+def _build_grid_image(scenes: List[Scene], valid_paths_map: dict | None = None) -> Image.Image:
+    def _paths(s: Scene) -> List[str]:
+        return valid_paths_map.get(s.index, s.frame_paths) if valid_paths_map else s.frame_paths
+
+    n_cols = max((len(_paths(s)) for s in scenes), default=3)
     n_cols = max(n_cols, 1)
 
     row_w = _CELL_PAD + n_cols * (_THUMB_W + _CELL_PAD)
@@ -419,7 +443,7 @@ def _build_grid_image(scenes: List[Scene]) -> Image.Image:
         draw.rectangle([_CELL_PAD, y, row_w - _CELL_PAD, y + _LABEL_H - 2], fill=(48, 48, 48))
         draw.text((_CELL_PAD + 6, y + 8), label, font=font, fill=(220, 220, 220))
 
-        for col_idx, path in enumerate(scene.frame_paths[:n_cols]):
+        for col_idx, path in enumerate(_paths(scene)[:n_cols]):
             x = _CELL_PAD + col_idx * (_THUMB_W + _CELL_PAD)
             fy = y + _LABEL_H
             try:
