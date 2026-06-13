@@ -71,6 +71,8 @@ def parse_args():
     parser.add_argument("--style", default="장면 중심",
                         choices=["장면 중심", "음성 중심", "균형"],
                         help="점수 가중치 스타일 (기본값: 장면 중심)")
+    parser.add_argument("--pipeline", default="scene", choices=["scene", "voice"],
+                        help="파이프라인 모드: scene=음성+장면(기본), voice=음성 중심")
     return parser.parse_args()
 
 
@@ -155,9 +157,56 @@ def run_from_scores(args, run_dir):
 
 
 # ────────────────────────────────────────────────
+# 음성 중심 파이프라인 (voice-pipeline)
+# ────────────────────────────────────────────────
+def _run_voice_pipeline(args, run_dir):
+    from voice_pipeline.gate import filter_silence, filter_ng
+    from voice_pipeline.gemini_scorer import score_segments
+
+    total_start = time.time()
+    print(f"\n실행 디렉토리: {run_dir}")
+
+    print(f"\n[1/3] STT 전사 중 (모델: {args.stt_model})...")
+    t0 = time.time()
+    from pipeline.stt import transcribe
+    segments = transcribe(args.video, model_size=args.stt_model)
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(segments)}개 세그먼트\n")
+
+    before = len(segments)
+    segments = filter_silence(segments)
+    segments = filter_ng(segments)
+    print(f"[Gate A/B] {before}개 → {len(segments)}개 (무음/NG 제거)\n")
+
+    print(f"[2/3] Gemini 핵심 구간 선별 중...")
+    t0 = time.time()
+    scored = score_segments(segments, model_name=args.model)
+    print(f"      완료 ({time.time() - t0:.1f}s)\n")
+
+    print(f"[3/3] 클립 선택 중...")
+    t0 = time.time()
+    highlights = select_top(scored, args.top_n, keep_only=not args.include_maybe, maybe_min_score=args.maybe_min_score)
+    print(f"      완료 ({time.time() - t0:.1f}s) — {len(highlights)}개 선택됨\n")
+
+    if not args.no_export:
+        export_path = os.path.join(run_dir, "highlight.mp4")
+        print(f"[영상 합치기] {export_path}")
+        t0 = time.time()
+        export_highlight(args.video, highlights, export_path)
+        size_mb = os.path.getsize(export_path) / (1024 * 1024)
+        print(f"      완료 ({time.time() - t0:.1f}s) — {size_mb:.1f} MB\n")
+
+    print(f"총 처리 시간: {time.time() - total_start:.1f}s")
+    _save(highlights, args.output or os.path.join(run_dir, "results.json"))
+
+
+# ────────────────────────────────────────────────
 # 모드 3: 전체 자동 (Gemini + STT)
 # ────────────────────────────────────────────────
 def run_full_auto(args, run_dir):
+    if args.pipeline == "voice":
+        _run_voice_pipeline(args, run_dir)
+        return
+
     total_start = time.time()
     frames_dir = os.path.join(run_dir, "frames")
     subject_label = f" [{args.subject}]" if args.subject else " [자동 감지]"

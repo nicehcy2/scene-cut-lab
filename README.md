@@ -6,12 +6,22 @@
 
 ## 파이프라인
 
+**음성+장면 모드 (기본)**
 ```
 영상 입력
   → [1] 장면 분할 (PySceneDetect)
   → [2] STT 전사 (faster-whisper)
   → [3] Gemini 2.5 Flash 스코어링 (시각 + 발화 정보)
   → [4] 장면 선택 → results.json + highlight.mp4
+```
+
+**음성 중심 모드 (`--pipeline voice`)**
+```
+영상 입력
+  → [1] STT 전사 (faster-whisper)
+  → [Gate A/B] 무음 · NG 발화 제거
+  → [2] Gemini 핵심 구간 선별 (텍스트만, importance 5/3/1)
+  → [3] 클립 선택 → results.json + highlight.mp4
 ```
 
 ---
@@ -56,6 +66,9 @@ uv run python main.py input.mp4 --top-n 5
 
 # maybe 장면도 포함 (기본: keep만)
 uv run python main.py input.mp4 --include-maybe
+
+# 음성 중심 모드 (인터뷰·강의·썰풀기 등 발화 위주 영상)
+uv run python main.py input.mp4 --pipeline voice
 
 # 장면 감지만 실행 (Gemini 없음, 분할 결과 확인용)
 uv run python main.py input.mp4 --detect-only
